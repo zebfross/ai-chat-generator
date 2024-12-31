@@ -1,16 +1,15 @@
-#Grab the latest alpine image
-FROM alpine:latest
+FROM python:3.8
 
-# Install python and pip
-RUN apk add --no-cache --update python3 py3-pip bash
-ADD ./requirements.txt /tmp/requirements.txt
+#Set the working directory
+WORKDIR /
 
-# Install dependencies
-RUN pip3 install --no-cache-dir -q -r /tmp/requirements.txt
+#copy all the files
+COPY . .
 
-# Add our code
-ADD ./ /opt/webapp/
-WORKDIR /opt/webapp
+#Install the dependencies
+RUN apt-get -y update
+RUN apt-get update && apt-get install -y python3 python3-pip
+RUN pip3 install -r requirements.txt
 
 # Expose is NOT supported by Heroku
 # EXPOSE 5000 		
