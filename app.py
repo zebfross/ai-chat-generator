@@ -7,15 +7,9 @@ start_time = time.time()
 from flask import Flask
 MyApp = Flask(__name__)
 
-from transformers import AutoTokenizer, AutoModel
-import torch
-
-# Load tokenizer and model
-tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-model = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-
 from openai import OpenAI
 from pinecone import Pinecone, ServerlessSpec
+from sentence_transformers import SentenceTransformer
 def timer(event_name):
     global start_time
     current_time = time.time()
@@ -36,7 +30,7 @@ db_index_name = "chat-history"
 embedding_model = "text-embedding-ada-002"
 
 # Ensure the index exists or create it if not
-# if db_index_name not in pc.list_indexes():
+#if db_index_name not in pc.list_indexes():
 #    pc.create_index(
 #        name=db_index_name,
 #        dimension=384,  # Adjust to match the embedding model dimensionality
@@ -57,17 +51,10 @@ def get_openai_embedding(text):
     return response['data'][0]['embedding']
 
 # Load a pre-trained sentence-transformer model
-# model = SentenceTransformer('all-MiniLM-L6-v2')  # Compact and efficient
+model = SentenceTransformer('all-MiniLM-L6-v2')  # Compact and efficient
 timer("load model")
-def get_embedding(texts):
-    # return model.encode(text).tolist()
-    inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True)
-    with torch.no_grad():
-        outputs = model(**inputs)
-        return outputs.last_hidden_state.mean(
-            dim=1
-        )  # Pooling to get sentence embeddings
-
+def get_embedding(text):
+    return model.encode(text).tolist()
 
 # Function to store chat history in Pinecone
 def store_chat(index, chat_message, response, timestamp):
