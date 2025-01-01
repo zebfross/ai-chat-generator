@@ -15,8 +15,8 @@ RUN pip3 install -r requirements.txt
 # EXPOSE 5000 		
 
 # Run the image as a non-root user
-RUN adduser --disabled-password myuser
-USER myuser
+#RUN adduser --disabled-password myuser
+#USER myuser
 
 # Run the app.  CMD is required to run on Heroku
 # $PORT is set by Heroku			
