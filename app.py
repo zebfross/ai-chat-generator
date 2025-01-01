@@ -4,7 +4,7 @@ import sys
 import time
 import os
 start_time = time.time()
-from flask import Flask
+from flask import Flask, request
 MyApp = Flask(__name__)
 
 from openai import OpenAI
