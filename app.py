@@ -30,7 +30,7 @@ db_index_name = "chat-history"
 embedding_model = "text-embedding-ada-002"
 
 # Ensure the index exists or create it if not
-#if db_index_name not in pc.list_indexes():
+# if db_index_name not in pc.list_indexes():
 #    pc.create_index(
 #        name=db_index_name,
 #        dimension=384,  # Adjust to match the embedding model dimensionality
@@ -134,4 +134,5 @@ These are similar chat requests we have received in the past and how we responde
 
 
 if __name__ == "__main__":
-	MyApp.run()
+    port = int(os.environ.get("PORT", 5000))
+    MyApp.run(host="0.0.0.0", port=port)
