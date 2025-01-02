@@ -100,7 +100,7 @@ def hello():
     query = args.get('message')
     results = search_similar_chats(index, query)
     timer("find similar chats")
-    history = """Can you pretend to be a TradelineWorks.com support chat agent?  Keep responses short and concise but try to lead toward making an appointment with a sale's agent if possible.  I'll give you previous chat requests we've received and how we responded to help you.  Try to stay with the provided style and content.
+    history = """Can you pretend to be a TradelineWorks.com support chat agent?  Keep responses short and concise.  I'll give you previous chat requests we've received and how we responded to help you.  Try to stay with the provided style and content.
 
 Please respond to the current chat.
 
