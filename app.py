@@ -3,8 +3,6 @@ import uuid
 import sys
 import time
 import os
-from dotenv import load_dotenv
-load_dotenv()
 start_time = time.time()
 from flask import Flask, request
 MyApp = Flask(__name__)
