@@ -131,7 +131,7 @@ These are similar chat requests we have received in the past and how we responde
     timer("chatgpt response")
     return response.choices[0].message.content
 
-@app.post("/v1/assist/suggest")
+@MyApp.post("/v1/assist/suggest")
 def assist_suggest():
     api_key = request.headers.get("X-API-Key")
     if not api_key or api_key != os.environ['api_key']:
