@@ -2,4 +2,4 @@ openai
 pinecone
 sentence-transformers
 flask
-
+python-dotenv

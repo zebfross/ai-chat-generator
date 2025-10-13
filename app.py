@@ -3,6 +3,8 @@ import uuid
 import sys
 import time
 import os
+from dotenv import load_dotenv
+load_dotenv()
 start_time = time.time()
 from flask import Flask, request
 MyApp = Flask(__name__)
@@ -92,7 +94,6 @@ def hello():
     #        store_chat(index, chat_message, response, timestamp)
     #    except:
     #        print("Error indexing message at ", timestamp)
-
     #print("Chat history successfully stored in Pinecone.")
 
     # Example: Search for similar chats
@@ -131,6 +132,48 @@ These are similar chat requests we have received in the past and how we responde
     #print("ChatGPT response:")
     timer("chatgpt response")
     return response.choices[0].message.content
+
+@app.post("/v1/assist/suggest")
+def assist_suggest():
+    api_key = request.headers.get("X-API-Key")
+    if not api_key or api_key != os.environ['api_key']:
+        return jsonify({"error": "unauthorized", "message": "Invalid API key"}), 401
+
+    data = request.get_json(force=True, silent=True) or {}
+    message = data.get("message", "").strip()
+    if not message:
+        return jsonify({"error": "validation_error", "message": "message is required"}), 400
+    
+    results = search_similar_chats(index, message)
+    timer("find similar chats")
+
+    items: List[Dict[str, Any]] = []
+    for m in results['matches']:
+        md = m.get("metadata") or {}
+        # Reserve known keys; pass the rest through under metadata
+        msg = md.get("chat_message") or md.get("message") or ""
+        resp = md.get("response") or ""
+        timestamp = md.get("timestamp")
+        # normalize timestamp if it looks like a number
+        if isinstance(timestamp, (int, float)):
+            timestamp = datetime.utcfromtimestamp(timestamp).isoformat() + "Z"
+
+        # drop reserved keys from metadata passthrough
+        passthrough = {k: v for k, v in md.items() if k not in {"chat_message", "message", "response", "timestamp"}}
+
+        items.append({
+            "id": m.get("id", ""),
+            "message": msg,
+            "response": resp,
+            "timestamp": timestamp,              # may be None (allowed by schema)
+            "score": float(m.get("score", 0.0)),
+            "source": "pinecone",
+            "metadata": passthrough,
+        })
+
+    return {
+        "results": items,
+    }, 200
 
 
 if __name__ == "__main__":
