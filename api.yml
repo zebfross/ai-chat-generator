@@ -1,4 +1,4 @@
-openapi: 3.0.0
+openapi: 3.0.3
 info:
   title: TradelineWorks Assist API
   version: "1.0.0"
@@ -6,6 +6,9 @@ info:
     API used by Tawk.to's AI assistant. For each incoming user message,
     the assistant calls this endpoint to retrieve similar historical chats
     with replies from real TradelineWorks agents.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
 
 servers:
   - url: https://ai-chat-message-18f230f5b066.herokuapp.com
@@ -59,7 +62,6 @@ paths:
                         message: "Do you ship to Canada?"
                         response: "We ship worldwide; Canada typically 5–10 business days."
                         timestamp: "2024-11-12T16:21:00Z"
-                        score: 0.82
                         source: "pinecone"
                         metadata:
                           tags: ["shipping", "international"]
@@ -67,7 +69,6 @@ paths:
                         message: "International shipping times?"
                         response: "7–14 days standard, 3–5 days express."
                         timestamp: "2024-10-01T12:05:05Z"
-                        score: 0.74
                         source: "pinecone"
                         metadata: {}
         "400":

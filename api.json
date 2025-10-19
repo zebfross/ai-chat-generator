@@ -1,0 +1,270 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "TradelineWorks Assist API",
+    "version": "1.0.0",
+    "description": "API used by Tawk.to's AI assistant. For each incoming user message,\nthe assistant calls this endpoint to retrieve similar historical chats\nwith replies from real TradelineWorks agents.\n",
+    "license": {
+      "name": "MIT",
+      "url": "https://opensource.org/licenses/MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://ai-chat-message-18f230f5b066.herokuapp.com",
+      "description": "Production"
+    }
+  ],
+  "paths": {
+    "/v1/assist/suggest": {
+      "post": {
+        "summary": "Retrieve relevant historical responses for simalar requests",
+        "description": "Given a user message, returns the responses for the top five most similar\nhistorical messages.\n",
+        "operationId": "postAssistSuggest",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SuggestRequest"
+              },
+              "examples": {
+                "minimal": {
+                  "value": {
+                    "message": "Do you ship internationally?"
+                  }
+                },
+                "withContext": {
+                  "value": {
+                    "message": "I can't log in—keeps saying invalid token",
+                    "conversation_id": "tawk-12345",
+                    "user_id": "cust_789",
+                    "top_k": 5,
+                    "metadata": {
+                      "channel": "web",
+                      "locale": "en-US"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "headers": {
+              "X-Request-Id": {
+                "description": "Correlation ID for debugging",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuggestResponse"
+                },
+                "examples": {
+                  "success": {
+                    "value": {
+                      "results": [
+                        {
+                          "id": "hist_001",
+                          "message": "Do you ship to Canada?",
+                          "response": "We ship worldwide; Canada typically 5–10 business days.",
+                          "timestamp": "2024-11-12T16:21:00Z",
+                          "source": "pinecone",
+                          "metadata": {
+                            "tags": [
+                              "shipping",
+                              "international"
+                            ]
+                          }
+                        },
+                        {
+                          "id": "hist_742",
+                          "message": "International shipping times?",
+                          "response": "7–14 days standard, 3–5 days express.",
+                          "timestamp": "2024-10-01T12:05:05Z",
+                          "source": "pinecone",
+                          "metadata": {}
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "badInput": {
+                    "value": {
+                      "error": "validation_error",
+                      "message": "message is required"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized (missing/invalid API key)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key"
+      }
+    },
+    "schemas": {
+      "SuggestRequest": {
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "The latest end-user message to assist with.",
+            "minLength": 1
+          },
+          "conversation_id": {
+            "type": "string",
+            "description": "Optional ID to help you thread retrieval per conversation."
+          },
+          "user_id": {
+            "type": "string",
+            "description": "End user identifier, if available."
+          },
+          "top_k": {
+            "type": "integer",
+            "description": "Number of similar items to return.",
+            "default": 5,
+            "minimum": 1,
+            "maximum": 20
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Arbitrary context (locale, channel, plan, etc.)"
+          }
+        }
+      },
+      "SuggestResponse": {
+        "type": "object",
+        "required": [
+          "results"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RetrievalItem"
+            }
+          }
+        }
+      },
+      "RetrievalItem": {
+        "type": "object",
+        "required": [
+          "id",
+          "message",
+          "response"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Identifier of the historical record."
+          },
+          "message": {
+            "type": "string",
+            "description": "Historical user message (query text)."
+          },
+          "response": {
+            "type": "string",
+            "description": "Historical agent/bot response content."
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the historical exchange occurred."
+          },
+          "source": {
+            "type": "string",
+            "description": "Retrieval backend (e.g., pinecone, cache, db).",
+            "example": "pinecone"
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Extra attributes (tags, product, locale, etc.)"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "error",
+          "message"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Machine-readable error code"
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable error description"
+          }
+        }
+      }
+    }
+  }
+}
