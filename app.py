@@ -4,7 +4,13 @@ import sys
 import time
 import os
 start_time = time.time()
-from flask import Flask, request
+from flask import Flask, request, jsonify, Response
+from datetime import datetime
+from typing import List, Dict, Any
+try:
+    import yaml  # pip install pyyaml
+except ImportError:
+    yaml = None
 MyApp = Flask(__name__)
 
 from openai import OpenAI
@@ -18,6 +24,9 @@ def timer(event_name):
 
 timer("import transformer")
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SPEC_FILENAME = "api.yml"   # your file
+SPEC_PATH = os.path.join(BASE_DIR, SPEC_FILENAME)
 
 # Initialize OpenAI and Pinecone
 client = OpenAI(
@@ -130,6 +139,19 @@ These are similar chat requests we have received in the past and how we responde
     #print("ChatGPT response:")
     timer("chatgpt response")
     return response.choices[0].message.content
+
+@MyApp.get("/openapi.yaml")
+def serve_openapi_yaml():
+    if not os.path.exists(SPEC_PATH):
+        return Response("Spec not found (api.yml)", status=404, mimetype="text/plain; charset=utf-8")
+
+    with open(SPEC_PATH, "rb") as f:
+        data = f.read()
+
+    resp = Response(data, status=200, mimetype="text/yaml; charset=utf-8")
+    # Optional: allow third-party fetches
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
 
 @MyApp.post("/v1/assist/suggest")
 def assist_suggest():
