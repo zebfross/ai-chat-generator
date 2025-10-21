@@ -177,6 +177,7 @@ def assist_suggest():
     # Parse input early so we can log safely even on failure
     data = request.get_json(force=True, silent=True) or {}
     message = (data.get("message") or "").strip()
+    
     _log(
         "assist_suggest.request",
         req_id=req_id,
@@ -226,6 +227,12 @@ def assist_suggest():
             "source": "pinecone",
             "metadata": passthrough,
         })
+
+    sample_items = items[:3]  # avoid blowing up logs
+    # Truncate large fields in the sample to keep logs readable
+    def _truncate(s, n=200):
+        return s if not isinstance(s, str) or len(s) <= n else s[:n] + "…"
+
 
     _log(
         "assist_suggest.response",
