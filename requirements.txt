@@ -3,3 +3,4 @@ pinecone
 sentence-transformers
 flask
 pyyaml
+flask_cors

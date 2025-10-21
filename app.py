@@ -8,6 +8,7 @@ start_time = time.time()
 from flask import Flask, request, jsonify, Response
 from datetime import datetime
 from typing import List, Dict, Any
+from flask_cors import CORS
 try:
     import yaml  # pip install pyyaml
 except ImportError:
@@ -16,6 +17,15 @@ MyApp = Flask(__name__)
 
 # Optional: set up root logger if you haven't already (Heroku reads stdout)
 logging.basicConfig(level=logging.INFO)
+
+CORS(
+    MyApp,
+    resources={r"/v1/*": {"origins": "*"}},
+    supports_credentials=False,
+    allow_headers=["Content-Type", "X-API-Key"],
+    methods=["POST", "OPTIONS"],
+    max_age=86400,
+)
 
 def _log(event: str, **payload):
     # Compact JSON for easy grepping in Heroku logs
