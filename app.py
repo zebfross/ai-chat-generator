@@ -3,6 +3,7 @@ import uuid
 import sys
 import time
 import os
+import logging
 start_time = time.time()
 from flask import Flask, request, jsonify, Response
 from datetime import datetime
@@ -12,6 +13,16 @@ try:
 except ImportError:
     yaml = None
 MyApp = Flask(__name__)
+
+# Optional: set up root logger if you haven't already (Heroku reads stdout)
+logging.basicConfig(level=logging.INFO)
+
+def _log(event: str, **payload):
+    # Compact JSON for easy grepping in Heroku logs
+    try:
+        logging.info(json.dumps({"event": event, **payload}, default=str))
+    except Exception as e:
+        logging.info(json.dumps({"event": event, "log_error": str(e)}))
 
 from openai import OpenAI
 from pinecone import Pinecone, ServerlessSpec
@@ -155,6 +166,31 @@ def serve_openapi_yaml():
 
 @MyApp.post("/v1/assist/suggest")
 def assist_suggest():
+
+    req_id = str(uuid.uuid4())
+    t0 = time.time()
+
+    # Grab API key but DO NOT log it
+    api_key = request.headers.get("X-API-Key")
+    authed = bool(api_key and api_key == os.environ.get("api_key"))
+
+    # Parse input early so we can log safely even on failure
+    data = request.get_json(force=True, silent=True) or {}
+    message = (data.get("message") or "").strip()
+    _log(
+        "assist_suggest.request",
+        req_id=req_id,
+        method=request.method,
+        path=request.path,
+        remote_addr=request.headers.get("X-Forwarded-For") or request.remote_addr,
+        user_agent=request.headers.get("User-Agent"),
+        query_args=request.args.to_dict(flat=True),
+        # Redact sensitive headers; show presence of API key only
+        has_api_key=bool(api_key),
+        body_preview=(message[:200] + ("…" if len(message) > 200 else "")),
+        body_len=len(message),
+    )
+
     api_key = request.headers.get("X-API-Key")
     if not api_key or api_key != os.environ['api_key']:
         return jsonify({"error": "unauthorized", "message": "Invalid API key"}), 401
@@ -190,6 +226,18 @@ def assist_suggest():
             "source": "pinecone",
             "metadata": passthrough,
         })
+
+    _log(
+        "assist_suggest.response",
+        req_id=req_id,
+        total_items=len(items),
+        sample=[{
+            **{k: v for k, v in it.items() if k not in {"message", "response"}},
+            "message_preview": _truncate(it.get("message", "")),
+            "response_preview": _truncate(it.get("response", "")),
+        } for it in sample_items],
+        elapsed_ms=int((time.time() - t0) * 1000),
+    )
 
     return {
         "results": items,
