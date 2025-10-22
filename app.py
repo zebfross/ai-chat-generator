@@ -28,7 +28,7 @@ CORS(
     resources={r"/v1/*": {"origins": "*"}},
     supports_credentials=False,
     allow_headers=["Content-Type", "X-API-Key"],
-    methods=["POST", "OPTIONS"],
+    methods=["POST", "GET", "OPTIONS"],
     max_age=86400,
 )
 
@@ -360,7 +360,7 @@ def serve_openapi_yaml():
 MyApp.url_map.strict_slashes = False
 
 
-@MyApp.post("/v1/assist/suggest")
+@MyApp.get("/v1/assist/suggest")
 def assist_suggest():
 
     req_id = str(uuid.uuid4())

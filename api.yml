@@ -16,33 +16,20 @@ servers:
 
 paths:
   /v1/assist/suggest:
-    post:
-      summary: Retrieve relevant historical responses for simalar requests
+    get:
+      summary: Retrieve relevant historical responses for similar requests
       description: |
-        Given a user message, returns the responses for the top five most similar
+        Given a user message, returns the responses for the top 5 most similar
         historical messages.
-      operationId: postAssistSuggest
+      operationId: getAssistSuggest
       security:
         - ApiKeyAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/SuggestRequest"
-            examples:
-              minimal:
-                value:
-                  message: "Do you ship internationally?"
-              withContext:
-                value:
-                  message: "I can't log in—keeps saying invalid token"
-                  conversation_id: "tawk-12345"
-                  user_id: "cust_789"
-                  top_k: 5
-                  metadata:
-                    channel: "web"
-                    locale: "en-US"
+      parameters:
+        - in: query
+          name: message
+          required: true
+          schema: { type: string }
+          description: The user's message to search against.
       responses:
         "200":
           description: OK
