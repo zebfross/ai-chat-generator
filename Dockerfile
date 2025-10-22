@@ -9,7 +9,7 @@ COPY . .
 #Install the dependencies
 RUN apt-get -y update
 RUN apt-get update && apt-get install -y python3 python3-pip
-RUN pip3 install --no-cache-dir openai flask pinecone
+RUN pip3 install --no-cache-dir openai flask pinecone flask-cors
 RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir sentence-transformers
 
