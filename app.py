@@ -39,103 +39,103 @@ from typing import Any, Dict, Tuple
 SENSITIVE_HEADER_KEYS = {"authorization", "x-api-key", "proxy-authorization"}
 
 
-def _extract_message_from_request(req):
+def extract_message(req):
     """
-    Be liberal in what you accept:
-    - {"message": "..."}
-    - {"arguments": "{\"message\":\"...\"}"}
-    - {"arguments": {"message":"..."}}
-    - {"input": "..."} / {"query": "..."}  (extra tolerance)
-    - form-urlencoded: message=...
-    - raw 'message=...' bodies
-    Returns (message or None, debug_dict)
+    Returns (message_or_None, source, debug)
+    source ∈ {"json","arguments_json","form","query","raw_kv",None}
     """
-    debug = {"shape": None, "keys": None, "notes": []}
+    debug = {
+        "notes": [],
+        "json_keys": None,
+        "form_keys": None,
+        "query_keys": list(req.args.keys()),
+    }
 
-    raw = req.get_data(as_text=True) or ""
+    # --- RAW (cached) & content-type ---
+    raw = req.get_data(cache=True, as_text=True) or ""
     ct = (req.headers.get("Content-Type") or "").lower()
 
-    # 1) Try JSON regardless of content-type
+    # --- JSON body (even if CT is wrong) ---
     data = req.get_json(silent=True)
     if isinstance(data, str):
-        debug["notes"].append("top_level_string_json")
         try:
             data = json.loads(data)
+            debug["notes"].append("top_level_string_json_unwrapped")
         except Exception:
             data = None
 
     if isinstance(data, dict):
-        debug["shape"] = "json_object"
-        debug["keys"] = list(data.keys())
+        debug["json_keys"] = list(data.keys())
+        # direct message
+        m = data.get("message")
+        if isinstance(m, str) and m.strip():
+            return m.strip(), "json", debug
 
-        # Direct message
-        msg = data.get("message")
-        if isinstance(msg, str) and msg.strip():
-            return msg.strip(), debug
-
-        # Wrapped in arguments
+        # arguments object or stringified
         args = data.get("arguments")
         if isinstance(args, dict):
-            debug["notes"].append("arguments_as_object")
-            msg = args.get("message")
-            if isinstance(msg, str) and msg.strip():
-                return msg.strip(), debug
+            m = args.get("message")
+            if isinstance(m, str) and m.strip():
+                debug["notes"].append("arguments_object")
+                return m.strip(), "arguments_json", debug
         elif isinstance(args, str):
-            debug["notes"].append("arguments_as_string")
-            # Sometimes it's a JSON string
             try:
-                args_obj = json.loads(args)
-                if isinstance(args_obj, dict):
-                    msg = args_obj.get("message")
-                    if isinstance(msg, str) and msg.strip():
-                        return msg.strip(), debug
+                obj = json.loads(args)
+                if isinstance(obj, dict):
+                    m = obj.get("message")
+                    if isinstance(m, str) and m.strip():
+                        debug["notes"].append("arguments_string_json")
+                        return m.strip(), "arguments_json", debug
             except Exception:
-                # Or just a bare string message
-                if args.strip():
-                    return args.strip(), debug
-
-        # Fallback aliases
-        for alt in ("input", "query", "q", "text", "prompt"):
-            v = data.get(alt)
+                pass
+        # common aliases in JSON
+        for k in ("input", "query", "q", "text", "prompt"):
+            v = data.get(k)
             if isinstance(v, str) and v.strip():
-                debug["notes"].append(f"used_alias_{alt}")
-                return v.strip(), debug
+                debug["notes"].append(f"json_alias:{k}")
+                return v.strip(), "json", debug
 
-    # 2) application/x-www-form-urlencoded
-    if "application/x-www-form-urlencoded" in ct:
-        form = req.form or {}
-        debug["shape"] = "form"
-        debug["keys"] = list(form.keys())
-        for k in ("message", "arguments", "input", "query", "q", "text", "prompt"):
-            v = form.get(k)
-            if v:
-                # If arguments is JSON string, unwrap
-                if k == "arguments":
-                    try:
-                        obj = json.loads(v)
-                        if isinstance(obj, dict) and isinstance(
-                            obj.get("message"), str
-                        ):
-                            return obj["message"].strip(), debug
-                    except Exception:
-                        pass
-                if isinstance(v, str) and v.strip():
-                    return v.strip(), debug
+    # --- form (x-www-form-urlencoded or multipart) ---
+    form = req.form.to_dict(flat=True) if getattr(req, "form", None) else {}
+    debug["form_keys"] = list(form.keys())
+    for k in ("message", "input", "query", "q", "text", "prompt", "arguments"):
+        v = form.get(k)
+        if v and isinstance(v, str) and v.strip():
+            # if arguments looks like JSON, unwrap message
+            if k == "arguments":
+                try:
+                    obj = json.loads(v)
+                    if isinstance(obj, dict) and isinstance(obj.get("message"), str):
+                        return obj["message"].strip(), "form", debug
+                except Exception:
+                    pass
+            return v.strip(), "form", debug
 
-    # 3) Raw "message=..." body
+    # --- query string (ALWAYS check this) ---
+    for k in ("message", "input", "query", "q", "text", "prompt", "arguments"):
+        v = req.args.get(k)
+        if v and isinstance(v, str) and v.strip():
+            # unwrap arguments if JSON-looking
+            if k == "arguments":
+                try:
+                    obj = json.loads(v)
+                    if isinstance(obj, dict) and isinstance(obj.get("message"), str):
+                        return obj["message"].strip(), "query", debug
+                except Exception:
+                    pass
+            return v.strip(), "query", debug
+
+    # --- raw fallback like 'message=abc' ---
     if raw and "=" in raw and "&" not in raw and "{" not in raw:
-        debug["shape"] = "raw_kv"
         try:
             kv = parse_qs(raw, keep_blank_values=True)
             vlist = kv.get("message") or kv.get("arguments")
             if vlist and vlist[0].strip():
-                return vlist[0].strip(), debug
+                return vlist[0].strip(), "raw_kv", debug
         except Exception:
             pass
 
-    # 4) Nothing usable
-    debug["shape"] = debug["shape"] or "unknown"
-    return None, debug
+    return None, None, debug
 
 
 def _trunc(s: Any, n: int = 1000) -> Any:
@@ -374,7 +374,7 @@ def assist_suggest():
     req_summary, raw_text, parsed_json, form_dict = _inspect_request(request)
 
     # Extract message using your tolerant parser (recommended)
-    message, parse_dbg = _extract_message_from_request(
+    message, source, parse_dbg = extract_message(
         request
     )  # returns (message|None, debug_dict)
 
@@ -392,6 +392,7 @@ def assist_suggest():
         route_matched=str(request.url_rule) if request.url_rule else None,
         **req_summary,  # content_type, content_length, headers (redacted), args, form_keys, files, raw_len/preview, json_keys
         message_preview=_trunc(message or "", 400),
+        message_source=source,
         parse_debug=parse_dbg,  # which shape we detected, notes, keys, etc.
     )
 
@@ -399,8 +400,6 @@ def assist_suggest():
     if not api_key or api_key != os.environ["api_key"]:
         return jsonify({"error": "unauthorized", "message": "Invalid API key"}), 401
 
-    data = request.get_json(force=True, silent=True) or {}
-    message = data.get("message", "").strip()
     if not message:
         return (
             jsonify({"error": "validation_error", "message": "message is required"}),
