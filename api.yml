@@ -29,7 +29,7 @@ paths:
           name: message
           required: true
           schema: { type: string }
-          description: The user's message to search against.
+          description: The entire chat transcript, including the latest user message.
       responses:
         "200":
           description: OK
