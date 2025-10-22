@@ -174,6 +174,7 @@ def serve_openapi_yaml():
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
 
+MyApp.url_map.strict_slashes = False
 @MyApp.post("/v1/assist/suggest")
 def assist_suggest():
 
