@@ -3,6 +3,7 @@ import uuid
 import sys
 import time
 import os
+import re
 import logging
 start_time = time.time()
 from flask import Flask, request, jsonify, Response
@@ -260,6 +261,89 @@ def assist_suggest():
     return {
         "results": items,
     }, 200
+
+
+@MyApp.route("/", defaults={"path": ""}, methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+@MyApp.route("/<path:path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+def catch_all(path):
+    """
+    Catches any unrecognized route. Never pass path vars to a view
+    that doesn't accept them. This function accepts the param itself.
+    """
+
+    req_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+    t0 = time.time()
+
+    norm = "/" + re.sub(r"/+", "/", (path or "").strip("/"))
+    raw = request.get_data(as_text=True) or ""
+
+    # Log every unmatched request
+    _log("catch_all.request",
+         req_id=req_id,
+         method=request.method,
+         path="/" + (path or ""),
+         norm=norm,
+         remote_addr=request.headers.get("X-Forwarded-For") or request.remote_addr,
+         user_agent=request.headers.get("User-Agent"),
+         content_type=request.headers.get("Content-Type"),
+         headers=dict(request.headers),
+         args=request.args.to_dict(flat=True),
+         raw_len=len(raw),
+         raw_preview=(raw[:400] + ("…" if len(raw) > 400 else "")))
+
+    # Normalize path for fuzzy routing
+    norm = "/" + re.sub(r"/+", "/", path or "").strip("/")
+
+    # Preflight support so browser tools don't choke
+    if request.method == "OPTIONS":
+        resp = MyApp.response_class(status=204)
+        h = resp.headers
+        h["Access-Control-Allow-Origin"] = "*"
+        h["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        h["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key"
+        h["Access-Control-Max-Age"] = "86400"
+        return resp
+
+    # ---- Optional fuzzy forward while debugging ----
+    # If the tool mangled the path but it still ends with /assist/suggest,
+    # forward to your suggest implementation.
+    if norm.endswith("/assist/suggest"):
+        logging.info(f"catch_all.fuzzy_forward norm={norm} method={request.method}")
+        # Only allow POST through to the impl; otherwise tell the client
+        if request.method != "POST":
+            return jsonify({"error": "method_not_allowed", "message": "Use POST for assist/suggest"}), 405
+        # Call your implementation directly
+        return _assist_suggest_impl_direct()
+
+    # ---- Otherwise: return a rich 404 with diagnostics ----
+    info = {
+        "error": "not_found",
+        "path": norm,
+        "method": request.method,
+        "hint": "Check base URL + path concatenation or OpenAPI servers/base settings.",
+        "received_headers": {k: v for k, v in request.headers.items()},
+    }
+
+    # Include a small preview of the body to debug clients sending stringified JSON, etc.
+    raw = request.get_data(as_text=True)
+    info["raw_len"] = len(raw)
+    info["raw_preview"] = raw[:300]
+
+    # Try parse JSON even if content-type is wrong
+    try:
+        parsed = request.get_json(silent=True)
+        if isinstance(parsed, str):
+            # Some tools send JSON as a string; try a second parse
+            parsed2 = json.loads(parsed)
+            parsed = parsed2
+        if parsed is not None:
+            info["parsed_json"] = parsed
+    except Exception as e:
+        info["json_error"] = str(e)
+
+    resp = jsonify(info)
+    resp.headers.setdefault("Access-Control-Allow-Origin", "*")
+    return resp, 404
 
 
 if __name__ == "__main__":
