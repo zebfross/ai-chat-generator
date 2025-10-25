@@ -429,13 +429,8 @@ def assist_suggest():
 
         items.append(
             {
-                "id": m.get("id", ""),
-                "message": msg,
+                "question": msg,
                 "response": resp,
-                "timestamp": timestamp,  # may be None (allowed by schema)
-                "score": float(m.get("score", 0.0)),
-                "source": "pinecone",
-                "metadata": passthrough,
             }
         )
 
@@ -460,19 +455,7 @@ def assist_suggest():
         elapsed_ms=int((time.time() - t0) * 1000),
     )
 
-    lines = []
-    for it in items:
-        q = (it.get("message") or "").strip().replace("\n", " ")
-        a = (it.get("response") or "").strip().replace("\n", " ")
-        if not q or not a:
-            continue
-        lines.append(f"- Q: {q}\n  A: {a}")
-    summary = "\n\n".join(lines)
-
-    return {
-        "results": items,
-        "summary": summary
-    }, 200
+    return items, 200
 
 
 @MyApp.route(
