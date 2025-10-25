@@ -460,8 +460,18 @@ def assist_suggest():
         elapsed_ms=int((time.time() - t0) * 1000),
     )
 
+    lines = []
+    for it in items[:max_pairs]:
+        q = (it.get("message") or "").strip().replace("\n", " ")
+        a = (it.get("response") or "").strip().replace("\n", " ")
+        if not q or not a:
+            continue
+        lines.append(f"- Q: {q}\n  A: {a}")
+    summary = "Use the following prior Q&A pairs as style and tone hints. Do not copy verbatim.\n\n" + "\n\n".join(lines)
+
     return {
         "results": items,
+        "summary": summary
     }, 200
 
 
