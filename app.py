@@ -455,7 +455,9 @@ def assist_suggest():
         elapsed_ms=int((time.time() - t0) * 1000),
     )
 
-    return items, 200
+    return {
+        "results": items
+    }, 200
 
 
 @MyApp.route(
