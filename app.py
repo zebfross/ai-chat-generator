@@ -466,6 +466,7 @@ def assist_suggest():
 
 CHATWOOT_URL = os.environ.get("CHATWOOT_URL", "https://chat.inceptify.com")
 CHATWOOT_BOT_TOKEN = os.environ.get("CHATWOOT_BOT_TOKEN", "")
+CHATWOOT_USER_TOKEN = os.environ.get("CHATWOOT_USER_TOKEN", CHATWOOT_BOT_TOKEN)
 
 SYSTEM_PROMPT = (
     "You are a TradelineWorks.com support chat agent. Keep responses short and concise. "
@@ -479,6 +480,7 @@ SYSTEM_PROMPT = (
 # ---------------------------------------------------------------------------
 TW_BASE_URL = os.environ.get("TW_BASE_URL", "").rstrip("/")
 TW_BOT_API_KEY = os.environ.get("TW_BOT_API_KEY", "")
+TW_VERIFY_SSL = not any(h in TW_BASE_URL for h in ("localhost", ".local", "127.0.0.1"))
 
 TOOLS = [
     {
@@ -581,6 +583,7 @@ def _tool_search_tradelines(tool_input: dict) -> str:
             params=params,
             headers=_tw_headers(),
             timeout=15,
+            verify=TW_VERIFY_SSL,
         )
         resp.raise_for_status()
         cards = resp.json()
@@ -595,7 +598,7 @@ def _tool_search_tradelines(tool_input: dict) -> str:
     for c in cards:
         lines.append(
             f"- {c['name']} | Age: {c['age']} | "
-            f"Limit: ${c['limit']:,} | Price: ${c['price']} | "
+            f"Limit: ${int(float(c['limit'])):,} | Price: ${c['price']} | "
             f"Stock: {c['stock_remaining']}"
         )
     return "\n".join(lines)
@@ -617,6 +620,7 @@ def _tool_order_lookup(tool_input: dict, customer_email: str = None) -> str:
             params={"email": email},
             headers=_tw_headers(),
             timeout=15,
+            verify=TW_VERIFY_SSL,
         )
         if resp.status_code == 404:
             return f"No account found for {email}."
@@ -655,6 +659,7 @@ def _tool_reset_password(tool_input: dict, customer_email: str = None) -> str:
             json={"email": email},
             headers=_tw_headers(),
             timeout=15,
+            verify=TW_VERIFY_SSL,
         )
         if resp.status_code == 404:
             return f"No account found for {email}."
@@ -761,7 +766,7 @@ def fetch_conversation_messages(account_id, conversation_id):
       [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}, ...]
     """
     url = f"{CHATWOOT_URL}/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages"
-    headers = {"api_access_token": CHATWOOT_BOT_TOKEN}
+    headers = {"api_access_token": CHATWOOT_USER_TOKEN}
     try:
         resp = http_requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()

@@ -304,14 +304,17 @@ def test_tool_use_flow():
     ])
     set_anthropic_responses([
         # 1st response: Claude decides to call the tool
-        _make_tool_use_response("reset_password", {"email": "test@example.com"}),
+        _make_tool_use_response("reset_password", {"email": "oenhu@hoetn.com"}),
         # 2nd response: Claude's final answer after seeing the tool result
         _make_text_response(
-            "I've sent a password reset email to test@example.com. Please check your inbox!"
+            "I've sent a password reset email to oenhu@hoetn.com. Please check your inbox!"
         ),
     ])
 
-    resp = send_webhook("I need to reset my password, my email is test@example.com")
+    resp = send_webhook(
+        "I need to reset my password, my email is oenhu@hoetn.com",
+        sender_email="oenhu@hoetn.com",
+    )
     assert resp.status_code == 200
 
     reqs = get_anthropic_requests()
@@ -333,7 +336,6 @@ def test_tool_use_flow():
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "tool_result":
                     has_tool_result = True
-                    # The tool_result content should mention the reset attempt
                     print(f"  Tool result: {str(block.get('content', ''))[:120]}")
                     break
     assert has_tool_result, (
@@ -352,6 +354,165 @@ def test_tool_use_flow():
     print(f"  Tools sent: {tool_names}")
     print(f"  Tool result round-tripped: OK")
     print(f"  Reply: {replies[0]['content'][:100]}")
+
+
+def test_reset_password_via_wp():
+    """Reset password end-to-end: mock Anthropic triggers tool → bot hits real WP API.
+
+    Uses the local WP instance (https://wp.local) to actually send the
+    password-reset email for oenhu@hoetn.com and verifies the tool result
+    reports success.
+    """
+    clear_chatwoot()
+    clear_anthropic()
+    set_chatwoot_history([])
+    set_anthropic_responses([
+        _make_tool_use_response("reset_password", {"email": "oenhu@hoetn.com"}),
+        _make_text_response(
+            "Done! A password reset email has been sent to oenhu@hoetn.com."
+        ),
+    ])
+
+    resp = send_webhook(
+        "Can you reset my password? My email is oenhu@hoetn.com",
+        sender_name="Test User",
+        sender_email="oenhu@hoetn.com",
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+
+    reqs = get_anthropic_requests()
+    assert len(reqs) == 2, f"Expected 2 Anthropic requests, got {len(reqs)}"
+
+    # Find the tool_result in the second request and verify it indicates success
+    tool_result_content = None
+    for msg in reqs[1].get("messages", []):
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    tool_result_content = block.get("content", "")
+                    break
+
+    assert tool_result_content is not None, "No tool_result found in second Anthropic request"
+
+    # The WP API should have found the user and sent the reset email
+    result_lower = tool_result_content.lower()
+    assert "password-reset" in result_lower or "reset" in result_lower, (
+        f"Tool result doesn't indicate success: {tool_result_content}"
+    )
+    # Should NOT contain "error" or "no account"
+    assert "error" not in result_lower, (
+        f"Tool result contains error: {tool_result_content}"
+    )
+    assert "no account" not in result_lower, (
+        f"Tool result says no account found: {tool_result_content}"
+    )
+
+    replies = get_chatwoot_replies()
+    assert len(replies) >= 1, "No reply sent to Chatwoot"
+
+    print(f"  Tool result from WP: {tool_result_content}")
+    print(f"  Reply: {replies[0]['content'][:120]}")
+
+
+def test_search_tradelines_via_wp():
+    """Search tradelines end-to-end: mock Anthropic triggers tool → bot hits real WP API."""
+    clear_chatwoot()
+    clear_anthropic()
+    set_chatwoot_history([])
+    set_anthropic_responses([
+        _make_tool_use_response("search_tradelines", {"price_max": 1000}),
+        _make_text_response(
+            "Here are some tradelines under $1,000 that are currently available."
+        ),
+    ])
+
+    resp = send_webhook(
+        "What tradelines do you have under $1000?",
+        sender_name="John",
+        sender_email="oenhu@hoetn.com",
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+
+    reqs = get_anthropic_requests()
+    assert len(reqs) == 2, f"Expected 2 Anthropic requests, got {len(reqs)}"
+
+    # Find the tool_result in the second request
+    tool_result_content = None
+    for msg in reqs[1].get("messages", []):
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    tool_result_content = block.get("content", "")
+                    break
+
+    assert tool_result_content is not None, "No tool_result found in second Anthropic request"
+
+    result_lower = tool_result_content.lower()
+    assert "error" not in result_lower, (
+        f"Tool result contains error: {tool_result_content}"
+    )
+    # Should either find tradelines or say none match
+    assert "tradeline" in result_lower or "found" in result_lower or "no tradelines" in result_lower, (
+        f"Unexpected tool result: {tool_result_content[:300]}"
+    )
+
+    replies = get_chatwoot_replies()
+    assert len(replies) >= 1, "No reply sent to Chatwoot"
+
+    print(f"  Tool result from WP: {tool_result_content[:200]}")
+    print(f"  Reply: {replies[0]['content'][:120]}")
+
+
+def test_order_lookup_via_wp():
+    """Order lookup end-to-end: mock Anthropic triggers tool → bot hits real WP API."""
+    clear_chatwoot()
+    clear_anthropic()
+    set_chatwoot_history([])
+    set_anthropic_responses([
+        _make_tool_use_response("order_lookup", {"email": "oenhu@hoetn.com"}),
+        _make_text_response(
+            "Here's the status of your orders."
+        ),
+    ])
+
+    resp = send_webhook(
+        "What's the status of my order?",
+        sender_name="Test User",
+        sender_email="oenhu@hoetn.com",
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+
+    reqs = get_anthropic_requests()
+    assert len(reqs) == 2, f"Expected 2 Anthropic requests, got {len(reqs)}"
+
+    # Find the tool_result
+    tool_result_content = None
+    for msg in reqs[1].get("messages", []):
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    tool_result_content = block.get("content", "")
+                    break
+
+    assert tool_result_content is not None, "No tool_result found in second Anthropic request"
+
+    result_lower = tool_result_content.lower()
+    assert "error" not in result_lower, (
+        f"Tool result contains error: {tool_result_content}"
+    )
+    # Should find orders or say none found
+    assert "order" in result_lower or "found" in result_lower or "no active" in result_lower, (
+        f"Unexpected tool result: {tool_result_content[:300]}"
+    )
+
+    replies = get_chatwoot_replies()
+    assert len(replies) >= 1, "No reply sent to Chatwoot"
+
+    print(f"  Tool result from WP: {tool_result_content[:200]}")
+    print(f"  Reply: {replies[0]['content'][:120]}")
 
 
 def test_empty_message_no_api_call():
@@ -414,6 +575,9 @@ def main():
         ("Customer info in system prompt", test_customer_info_in_prompt),
         ("Conversation history forwarded", test_conversation_history_forwarded),
         ("Tool-use round-trip", test_tool_use_flow),
+        ("Reset password via WP API", test_reset_password_via_wp),
+        ("Search tradelines via WP API", test_search_tradelines_via_wp),
+        ("Order lookup via WP API", test_order_lookup_via_wp),
         ("Empty message — no API calls", test_empty_message_no_api_call),
     ]
 
