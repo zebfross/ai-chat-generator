@@ -335,7 +335,8 @@ Rules:
     logging.info("System: %s", history)
     logging.info("User: %s", query)
 
-    reply = _run_with_tools(history, [{"role": "user", "content": query}])
+    reply = _run_with_tools(history, [{"role": "user", "content": query}],
+                            customer_email=customer_email)
 
     logging.info("=== ANTHROPIC RESPONSE ===")
     logging.info("Reply: %s", reply)
@@ -476,7 +477,61 @@ SYSTEM_PROMPT = (
 # Tool definitions — sent with every Anthropic request so Claude knows
 # what actions it can take.  Add new tools here.
 # ---------------------------------------------------------------------------
+TW_BASE_URL = os.environ.get("TW_BASE_URL", "").rstrip("/")
+TW_BOT_API_KEY = os.environ.get("TW_BOT_API_KEY", "")
+
 TOOLS = [
+    {
+        "name": "search_tradelines",
+        "description": (
+            "Search available tradelines (authorized-user credit lines) for sale. "
+            "Use this when a customer asks about available tradelines, pricing, "
+            "or wants to find a tradeline matching certain criteria."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "age_min": {
+                    "type": "number",
+                    "description": "Minimum age of the tradeline in years.",
+                },
+                "age_max": {
+                    "type": "number",
+                    "description": "Maximum age of the tradeline in years.",
+                },
+                "limit_min": {
+                    "type": "number",
+                    "description": "Minimum credit limit in dollars.",
+                },
+                "limit_max": {
+                    "type": "number",
+                    "description": "Maximum credit limit in dollars.",
+                },
+                "price_max": {
+                    "type": "number",
+                    "description": "Maximum price in dollars.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "order_lookup",
+        "description": (
+            "Look up a customer's active tradeline orders by their email address. "
+            "Use this when a customer asks about the status of their order(s)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "description": "The customer's email address.",
+                },
+            },
+            "required": ["email"],
+        },
+    },
     {
         "name": "reset_password",
         "description": (
@@ -497,24 +552,122 @@ TOOLS = [
 ]
 
 
-def _execute_tool(name: str, tool_input: dict) -> str:
+def _tw_headers():
+    return {"X-Bot-Api-Key": TW_BOT_API_KEY}
+
+
+def _execute_tool(name: str, tool_input: dict, customer_email: str = None) -> str:
     """Dispatch a tool call and return a plain-text result string."""
+    if name == "search_tradelines":
+        return _tool_search_tradelines(tool_input)
+    if name == "order_lookup":
+        return _tool_order_lookup(tool_input, customer_email)
     if name == "reset_password":
-        return _tool_reset_password(tool_input)
+        return _tool_reset_password(tool_input, customer_email)
     return f"Unknown tool: {name}"
 
 
-def _tool_reset_password(tool_input: dict) -> str:
-    """Send a password-reset email via the TradelineWorks site."""
+def _tool_search_tradelines(tool_input: dict) -> str:
+    """Search available tradelines via the TW API."""
+    params = {}
+    for key in ("age_min", "age_max", "limit_min", "limit_max", "price_max"):
+        val = tool_input.get(key)
+        if val is not None:
+            params[key] = val
+
+    try:
+        resp = http_requests.get(
+            f"{TW_BASE_URL}/wp-json/tw/v1/bot/cards",
+            params=params,
+            headers=_tw_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        cards = resp.json()
+    except Exception as e:
+        logging.exception("search_tradelines error")
+        return f"Error searching tradelines: {e}"
+
+    if not cards:
+        return "No tradelines found matching those criteria."
+
+    lines = [f"Found {len(cards)} tradeline(s):\n"]
+    for c in cards:
+        lines.append(
+            f"- {c['name']} | Age: {c['age']} | "
+            f"Limit: ${c['limit']:,} | Price: ${c['price']} | "
+            f"Stock: {c['stock_remaining']}"
+        )
+    return "\n".join(lines)
+
+
+def _tool_order_lookup(tool_input: dict, customer_email: str = None) -> str:
+    """Look up a customer's orders via the TW API."""
     email = tool_input.get("email", "").strip()
     if not email:
         return "Error: no email address provided."
-    # TODO: replace with your real password-reset endpoint / logic
-    logging.info("TOOL reset_password called for %s", email)
+    if not customer_email:
+        return "Error: cannot look up orders — customer email is not verified for this session."
+    if email.lower() != customer_email.lower():
+        return f"Error: for security, I can only look up orders for the current customer ({customer_email})."
+
+    try:
+        resp = http_requests.get(
+            f"{TW_BASE_URL}/wp-json/tw/v1/bot/orders",
+            params={"email": email},
+            headers=_tw_headers(),
+            timeout=15,
+        )
+        if resp.status_code == 404:
+            return f"No account found for {email}."
+        resp.raise_for_status()
+        orders = resp.json()
+    except Exception as e:
+        logging.exception("order_lookup error")
+        return f"Error looking up orders: {e}"
+
+    if not orders:
+        return f"No active orders found for {email}."
+
+    lines = [f"Found {len(orders)} order(s) for {email}:\n"]
+    for o in orders:
+        lines.append(
+            f"- Order #{o['order_id']}: {o['card_name']} | "
+            f"Status: {o['status']} | Started: {o['start_date'] or 'N/A'}\n"
+            f"  Next step: {o['next_step']}"
+        )
+    return "\n".join(lines)
+
+
+def _tool_reset_password(tool_input: dict, customer_email: str = None) -> str:
+    """Send a password-reset email via the TW API."""
+    email = tool_input.get("email", "").strip()
+    if not email:
+        return "Error: no email address provided."
+    if not customer_email:
+        return "Error: cannot reset password — customer email is not verified for this session."
+    if email.lower() != customer_email.lower():
+        return f"Error: for security, I can only reset the password for the current customer ({customer_email})."
+
+    try:
+        resp = http_requests.post(
+            f"{TW_BASE_URL}/wp-json/tw/v1/bot/reset-password",
+            json={"email": email},
+            headers=_tw_headers(),
+            timeout=15,
+        )
+        if resp.status_code == 404:
+            return f"No account found for {email}."
+        resp.raise_for_status()
+    except Exception as e:
+        logging.exception("reset_password error")
+        return f"Error sending password reset: {e}"
+
     return f"A password-reset email has been sent to {email}."
 
 
-def _run_with_tools(system: str, messages: list, max_rounds: int = 5) -> str:
+def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
+                    customer_email: str = None) -> str:
     """Call Anthropic with tool support, looping until Claude is done.
 
     Returns the final text reply.
@@ -542,7 +695,7 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5) -> str:
             if block.type != "tool_use":
                 continue
             logging.info("TOOL CALL: %s(%s)", block.name, json.dumps(block.input))
-            result_str = _execute_tool(block.name, block.input)
+            result_str = _execute_tool(block.name, block.input, customer_email)
             logging.info("TOOL RESULT: %s", result_str)
             tool_results.append(
                 {
@@ -560,7 +713,8 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5) -> str:
     return "\n".join(text_parts) if text_parts else "I'm sorry, something went wrong."
 
 
-def generate_bot_response(message, customer_name=None, customer_email=None):
+def generate_bot_response(message, customer_name=None, customer_email=None,
+                          conversation_history=None):
     """Run Pinecone similarity search + Anthropic completion for a user message."""
     results = search_similar_chats(index, message)
 
@@ -583,7 +737,62 @@ def generate_bot_response(message, customer_name=None, customer_email=None):
 
     system += context
 
-    return _run_with_tools(system, [{"role": "user", "content": message}])
+    # Build message list: use conversation history if available,
+    # otherwise just the single incoming message
+    if conversation_history:
+        messages = list(conversation_history)
+        # Ensure the latest message is included (it may already be in history
+        # if Chatwoot processed it before our fetch, but append to be safe)
+        if not messages or messages[-1].get("content") != message:
+            messages.append({"role": "user", "content": message})
+        # Claude requires messages to start with "user" role
+        if messages and messages[0]["role"] != "user":
+            messages = messages[1:]
+    else:
+        messages = [{"role": "user", "content": message}]
+
+    return _run_with_tools(system, messages, customer_email=customer_email)
+
+
+def fetch_conversation_messages(account_id, conversation_id):
+    """Fetch prior messages in this Chatwoot conversation.
+
+    Returns a list of Claude-style message dicts:
+      [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}, ...]
+    """
+    url = f"{CHATWOOT_URL}/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages"
+    headers = {"api_access_token": CHATWOOT_BOT_TOKEN}
+    try:
+        resp = http_requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json().get("payload", [])
+    except Exception as e:
+        logging.warning("Failed to fetch conversation history: %s", e)
+        return []
+
+    # Chatwoot messages come newest-first; reverse to chronological
+    payload.sort(key=lambda m: m.get("id", 0))
+
+    messages = []
+    for msg in payload:
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
+        msg_type = msg.get("message_type")
+        # 0 = incoming (customer), 1 = outgoing (agent/bot)
+        if msg_type == 0:
+            role = "user"
+        elif msg_type == 1:
+            role = "assistant"
+        else:
+            continue
+        # Merge consecutive same-role messages
+        if messages and messages[-1]["role"] == role:
+            messages[-1]["content"] += "\n" + content
+        else:
+            messages.append({"role": role, "content": content})
+
+    return messages
 
 
 def send_chatwoot_message(account_id, conversation_id, content):
@@ -631,11 +840,18 @@ def chatwoot_webhook():
     customer_name = (sender.get("name") or "").strip() or None
     customer_email = (sender.get("email") or "").strip() or None
 
+    # Fetch prior messages so Claude sees the full conversation
+    conversation_history = fetch_conversation_messages(account_id, conversation_id)
+
     _log("webhook.incoming", account_id=account_id, conversation_id=conversation_id,
-         customer_name=customer_name, customer_email=customer_email, message=_trunc(content, 200))
+         customer_name=customer_name, customer_email=customer_email,
+         history_len=len(conversation_history), message=_trunc(content, 200))
 
     try:
-        bot_reply = generate_bot_response(content, customer_name=customer_name, customer_email=customer_email)
+        bot_reply = generate_bot_response(
+            content, customer_name=customer_name, customer_email=customer_email,
+            conversation_history=conversation_history,
+        )
         send_chatwoot_message(account_id, conversation_id, bot_reply)
         _log("webhook.replied", account_id=account_id, conversation_id=conversation_id, reply=_trunc(bot_reply, 200))
     except Exception as e:
