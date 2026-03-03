@@ -22,5 +22,9 @@ jobs:
             pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet
             pip install -r requirements.txt --quiet
             sudo systemctl restart ai-chat-bot
-            sleep 30
-            curl -sf 'http://localhost:5000/chat?message=ping' || { echo "Health check failed"; exit 1; }
+            for i in $(seq 1 12); do
+              sleep 5
+              curl -sf 'http://localhost:5000/chat?message=ping' && exit 0
+            done
+            echo "Health check failed after 60s"
+            exit 1
