@@ -14,11 +14,13 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: chatwoot
           key: ${{ secrets.DEPLOY_SSH_KEY }}
+          command_timeout: 5m
           script: |
             cd /home/chatwoot/ai-chat-generator
             git pull origin main
             source venv/bin/activate
+            pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet
             pip install -r requirements.txt --quiet
             sudo systemctl restart ai-chat-bot
-            sleep 3
-            curl -sf http://localhost:5000/chat?message=ping || { echo "Health check failed"; exit 1; }
+            sleep 30
+            curl -sf 'http://localhost:5000/chat?message=ping' || { echo "Health check failed"; exit 1; }
