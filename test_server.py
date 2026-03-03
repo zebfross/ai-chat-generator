@@ -37,6 +37,7 @@ mock_chatwoot = Flask("mock_chatwoot")
 
 _cw_canned_history = {"payload": []}
 _cw_captured_replies = []
+_cw_captured_status_toggles = []
 _cw_lock = threading.Lock()
 
 
@@ -52,11 +53,17 @@ def get_chatwoot_replies():
         return list(_cw_captured_replies)
 
 
+def get_chatwoot_status_toggles():
+    with _cw_lock:
+        return list(_cw_captured_status_toggles)
+
+
 def clear_chatwoot():
     global _cw_canned_history
     with _cw_lock:
         _cw_canned_history = {"payload": []}
         _cw_captured_replies.clear()
+        _cw_captured_status_toggles.clear()
 
 
 @mock_chatwoot.route(
@@ -83,6 +90,28 @@ def cw_post_message(aid, cid):
             }
         )
     return jsonify({"id": len(_cw_captured_replies), "content": data.get("content", "")})
+
+
+@mock_chatwoot.route(
+    "/api/v1/accounts/<int:aid>/conversations/<int:cid>/toggle_status",
+    methods=["POST"],
+)
+def cw_toggle_status(aid, cid):
+    data = flask_request.get_json(silent=True) or {}
+    with _cw_lock:
+        _cw_captured_status_toggles.append(
+            {
+                "account_id": aid,
+                "conversation_id": cid,
+                "status": data.get("status", ""),
+            }
+        )
+    return jsonify({
+        "payload": {
+            "current_status": data.get("status", "open"),
+            "conversation_id": cid,
+        }
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -174,12 +203,13 @@ def send_webhook(
     sender_email="john@example.com",
     conversation_id=1,
     account_id=1,
+    conversation_status="pending",
 ):
     payload = {
         "event": "message_created",
         "message_type": "incoming",
         "content": content,
-        "conversation": {"id": conversation_id},
+        "conversation": {"id": conversation_id, "status": conversation_status},
         "account": {"id": account_id},
         "sender": {"name": sender_name, "email": sender_email},
     }
@@ -515,6 +545,92 @@ def test_order_lookup_via_wp():
     print(f"  Reply: {replies[0]['content'][:120]}")
 
 
+def test_transfer_to_agent():
+    """Verify the transfer_to_agent tool toggles conversation status to 'open'."""
+    clear_chatwoot()
+    clear_anthropic()
+    set_chatwoot_history([])
+    set_anthropic_responses([
+        _make_tool_use_response("transfer_to_agent", {}),
+        _make_text_response(
+            "I've transferred you to a live agent. Someone will be with you shortly!"
+        ),
+    ])
+
+    resp = send_webhook(
+        "I want to talk to a real person",
+        sender_name="Jane",
+        sender_email="jane@example.com",
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+
+    reqs = get_anthropic_requests()
+    assert len(reqs) == 2, f"Expected 2 Anthropic requests, got {len(reqs)}"
+
+    # Verify tool definitions include transfer_to_agent
+    tool_names = [t["name"] for t in reqs[0].get("tools", [])]
+    assert "transfer_to_agent" in tool_names, f"transfer_to_agent not in tools: {tool_names}"
+
+    # Verify Chatwoot toggle_status was called with status "open"
+    toggles = get_chatwoot_status_toggles()
+    assert len(toggles) >= 1, f"Expected toggle_status call, got {len(toggles)}"
+    assert toggles[0]["status"] == "open", f"Expected status 'open', got {toggles[0]['status']}"
+    assert toggles[0]["account_id"] == 1
+    assert toggles[0]["conversation_id"] == 1
+
+    # Tool result should confirm transfer
+    tool_result_content = None
+    for msg in reqs[1].get("messages", []):
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    tool_result_content = block.get("content", "")
+                    break
+    assert tool_result_content is not None, "No tool_result in second request"
+    assert "transferred" in tool_result_content.lower() or "agent" in tool_result_content.lower(), (
+        f"Tool result doesn't confirm transfer: {tool_result_content}"
+    )
+
+    # Reply forwarded to Chatwoot
+    replies = get_chatwoot_replies()
+    assert len(replies) >= 1, "No reply sent to Chatwoot"
+
+    print(f"  Tools sent: {tool_names}")
+    print(f"  Toggle status called: {toggles[0]}")
+    print(f"  Tool result: {tool_result_content}")
+    print(f"  Reply: {replies[0]['content'][:120]}")
+
+
+def test_ignored_when_not_pending():
+    """Webhook should ignore messages when conversation status is not 'pending'."""
+    clear_chatwoot()
+    clear_anthropic()
+    set_chatwoot_history([])
+
+    resp = send_webhook(
+        "Hello, are you there?",
+        conversation_status="open",
+    )
+    assert resp.status_code == 200
+
+    data = resp.json()
+    assert "ignored" in data.get("status", ""), f"Expected ignored status, got: {data}"
+    assert "open" in data.get("reason", ""), f"Expected reason to mention 'open', got: {data}"
+
+    # No Anthropic request should have been made
+    reqs = get_anthropic_requests()
+    assert len(reqs) == 0, f"Expected 0 Anthropic requests, got {len(reqs)}"
+
+    # No reply to Chatwoot
+    replies = get_chatwoot_replies()
+    assert len(replies) == 0, f"Expected 0 Chatwoot replies, got {len(replies)}"
+
+    print(f"  Webhook response: {data}")
+    print(f"  Anthropic calls: 0 — OK")
+    print(f"  Chatwoot replies: 0 — OK")
+
+
 def test_empty_message_no_api_call():
     """Empty content — webhook returns early, no Anthropic or Chatwoot calls."""
     clear_chatwoot()
@@ -578,6 +694,8 @@ def main():
         ("Reset password via WP API", test_reset_password_via_wp),
         ("Search tradelines via WP API", test_search_tradelines_via_wp),
         ("Order lookup via WP API", test_order_lookup_via_wp),
+        ("Transfer to agent", test_transfer_to_agent),
+        ("Ignored when not pending", test_ignored_when_not_pending),
         ("Empty message — no API calls", test_empty_message_no_api_call),
     ]
 

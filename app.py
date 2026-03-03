@@ -471,7 +471,9 @@ CHATWOOT_USER_TOKEN = os.environ.get("CHATWOOT_USER_TOKEN", CHATWOOT_BOT_TOKEN)
 SYSTEM_PROMPT = (
     "You are a TradelineWorks.com support chat agent. Keep responses short and concise. "
     "I'll give you previous chat requests we've received and how we responded to help you. "
-    "Try to stay with the provided style and content."
+    "Try to stay with the provided style and content.\n\n"
+    "If you cannot help the customer, or they explicitly ask for a human agent, "
+    "use the transfer_to_agent tool to hand the conversation to a live agent."
 )
 
 # ---------------------------------------------------------------------------
@@ -551,6 +553,18 @@ TOOLS = [
             "required": ["email"],
         },
     },
+    {
+        "name": "transfer_to_agent",
+        "description": (
+            "Transfer the conversation to a live human agent. "
+            "Use this when you cannot help the customer or they ask for a human."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
 ]
 
 
@@ -558,7 +572,8 @@ def _tw_headers():
     return {"X-Bot-Api-Key": TW_BOT_API_KEY}
 
 
-def _execute_tool(name: str, tool_input: dict, customer_email: str = None) -> str:
+def _execute_tool(name: str, tool_input: dict, customer_email: str = None,
+                   account_id: int = None, conversation_id: int = None) -> str:
     """Dispatch a tool call and return a plain-text result string."""
     if name == "search_tradelines":
         return _tool_search_tradelines(tool_input)
@@ -566,6 +581,8 @@ def _execute_tool(name: str, tool_input: dict, customer_email: str = None) -> st
         return _tool_order_lookup(tool_input, customer_email)
     if name == "reset_password":
         return _tool_reset_password(tool_input, customer_email)
+    if name == "transfer_to_agent":
+        return _tool_transfer_to_agent(account_id, conversation_id)
     return f"Unknown tool: {name}"
 
 
@@ -597,7 +614,7 @@ def _tool_search_tradelines(tool_input: dict) -> str:
     lines = [f"Found {len(cards)} tradeline(s):\n"]
     for c in cards:
         lines.append(
-            f"- {c['name']} | Age: {c['age']} | "
+            f"- {c['name']} | Age: {c['age_months']} months | "
             f"Limit: ${int(float(c['limit'])):,} | Price: ${c['price']} | "
             f"Stock: {c['stock_remaining']}"
         )
@@ -671,8 +688,30 @@ def _tool_reset_password(tool_input: dict, customer_email: str = None) -> str:
     return f"A password-reset email has been sent to {email}."
 
 
+def _tool_transfer_to_agent(account_id: int, conversation_id: int) -> str:
+    """Toggle conversation status to 'open' so human agents can pick it up."""
+    if not account_id or not conversation_id:
+        return "Error: missing account or conversation ID for transfer."
+    url = (
+        f"{CHATWOOT_URL}/api/v1/accounts/{account_id}"
+        f"/conversations/{conversation_id}/toggle_status"
+    )
+    headers = {
+        "Content-Type": "application/json",
+        "api_access_token": CHATWOOT_BOT_TOKEN,
+    }
+    try:
+        resp = http_requests.post(url, json={"status": "open"}, headers=headers, timeout=10)
+        resp.raise_for_status()
+    except Exception as e:
+        logging.exception("transfer_to_agent error")
+        return f"Error transferring to agent: {e}"
+    return "Conversation transferred to a live agent."
+
+
 def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
-                    customer_email: str = None) -> str:
+                    customer_email: str = None, account_id: int = None,
+                    conversation_id: int = None) -> str:
     """Call Anthropic with tool support, looping until Claude is done.
 
     Returns the final text reply.
@@ -700,7 +739,8 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
             if block.type != "tool_use":
                 continue
             logging.info("TOOL CALL: %s(%s)", block.name, json.dumps(block.input))
-            result_str = _execute_tool(block.name, block.input, customer_email)
+            result_str = _execute_tool(block.name, block.input, customer_email,
+                                       account_id=account_id, conversation_id=conversation_id)
             logging.info("TOOL RESULT: %s", result_str)
             tool_results.append(
                 {
@@ -719,7 +759,8 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
 
 
 def generate_bot_response(message, customer_name=None, customer_email=None,
-                          conversation_history=None):
+                          conversation_history=None, account_id=None,
+                          conversation_id=None):
     """Run Pinecone similarity search + Anthropic completion for a user message."""
     results = search_similar_chats(index, message)
 
@@ -756,7 +797,8 @@ def generate_bot_response(message, customer_name=None, customer_email=None,
     else:
         messages = [{"role": "user", "content": message}]
 
-    return _run_with_tools(system, messages, customer_email=customer_email)
+    return _run_with_tools(system, messages, customer_email=customer_email,
+                           account_id=account_id, conversation_id=conversation_id)
 
 
 def fetch_conversation_messages(account_id, conversation_id):
@@ -836,6 +878,12 @@ def chatwoot_webhook():
     conversation_id = conversation.get("id") or data.get("conversation", {}).get("id")
     account_id = data.get("account", {}).get("id")
 
+    # Only respond to conversations in "pending" status (bot territory).
+    # Once a conversation is "open", human agents handle it.
+    conv_status = conversation.get("status")
+    if conv_status and conv_status != "pending":
+        return jsonify({"status": "ignored", "reason": f"conversation is {conv_status}"}), 200
+
     if not conversation_id or not account_id:
         _log("webhook.missing_ids", conversation_id=conversation_id, account_id=account_id)
         return jsonify({"error": "missing conversation_id or account_id"}), 400
@@ -856,6 +904,7 @@ def chatwoot_webhook():
         bot_reply = generate_bot_response(
             content, customer_name=customer_name, customer_email=customer_email,
             conversation_history=conversation_history,
+            account_id=account_id, conversation_id=conversation_id,
         )
         send_chatwoot_message(account_id, conversation_id, bot_reply)
         _log("webhook.replied", account_id=account_id, conversation_id=conversation_id, reply=_trunc(bot_reply, 200))
