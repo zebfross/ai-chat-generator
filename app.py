@@ -7,6 +7,9 @@ import time
 import uuid
 from urllib.parse import parse_qs
 
+from dotenv import load_dotenv
+load_dotenv()
+
 start_time = time.time()
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
@@ -296,41 +299,49 @@ def hello():
     # Example: Search for similar chats
     args = request.args
     query = args.get("message")
+    if not query:
+        return "message parameter is required", 400
+    customer_name = args.get("name")
+    customer_email = args.get("email")
+
     results = search_similar_chats(index, query)
     timer("find similar chats")
-    history = (
-        """Can you pretend to be a TradelineWorks.com support chat agent?  Keep responses short and concise.  I'll give you previous chat requests we've received and how we responded to help you.  Try to stay with the provided style and content.
+    history = """You are a support chat agent for TradelineWorks.com. Be friendly, concise, and helpful.
 
-Please respond to the current chat.
+Rules:
+- If you don't know the answer, say you'll connect them with a specialist.
+- Never make up pricing, guarantees, or specific timelines.
+- Match the tone and style of the example responses below.
 
-The current chat request is: """
-        + query
-        + """
+"""
 
-These are similar chat requests we have received in the past and how we responded to each: """
-    )
+    if customer_name or customer_email:
+        history += "Current customer info:\n"
+        if customer_name:
+            history += f"- Name: {customer_name}\n"
+        if customer_email:
+            history += f"- Email: {customer_email}\n"
+        history += "\n"
+
+    history += "Similar past conversations for reference:\n"
 
     for result in results["matches"]:
-        history += "\nChat: " + result["metadata"]["chat_message"]
-        history += "\nResponse:" + result["metadata"]["response"]
-        # history += "Timestamp:" + result['metadata']['timestamp']
-        history += "\n---\n"
+        history += "\nCustomer: " + result["metadata"]["chat_message"]
+        history += "\nAgent: " + result["metadata"]["response"]
+        history += "\n---"
 
-    # print(history)
-    # exit()
+    logging.info("=== ANTHROPIC REQUEST ===")
+    logging.info("Matches: %d", len(results["matches"]))
+    logging.info("System: %s", history)
+    logging.info("User: %s", query)
 
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        system=history,
-        messages=[
-            {"role": "user", "content": query},
-        ],
-        max_tokens=256,
-        temperature=0.7,
-    )
+    reply = _run_with_tools(history, [{"role": "user", "content": query}])
+
+    logging.info("=== ANTHROPIC RESPONSE ===")
+    logging.info("Reply: %s", reply)
 
     timer("anthropic response")
-    return response.content[0].text
+    return reply
 
 
 @MyApp.get("/openapi.yaml")
@@ -461,8 +472,95 @@ SYSTEM_PROMPT = (
     "Try to stay with the provided style and content."
 )
 
+# ---------------------------------------------------------------------------
+# Tool definitions — sent with every Anthropic request so Claude knows
+# what actions it can take.  Add new tools here.
+# ---------------------------------------------------------------------------
+TOOLS = [
+    {
+        "name": "reset_password",
+        "description": (
+            "Send a password-reset email to a TradelineWorks customer. "
+            "Use this when a customer asks to reset or change their password."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "description": "The customer's email address.",
+                },
+            },
+            "required": ["email"],
+        },
+    },
+]
 
-def generate_bot_response(message):
+
+def _execute_tool(name: str, tool_input: dict) -> str:
+    """Dispatch a tool call and return a plain-text result string."""
+    if name == "reset_password":
+        return _tool_reset_password(tool_input)
+    return f"Unknown tool: {name}"
+
+
+def _tool_reset_password(tool_input: dict) -> str:
+    """Send a password-reset email via the TradelineWorks site."""
+    email = tool_input.get("email", "").strip()
+    if not email:
+        return "Error: no email address provided."
+    # TODO: replace with your real password-reset endpoint / logic
+    logging.info("TOOL reset_password called for %s", email)
+    return f"A password-reset email has been sent to {email}."
+
+
+def _run_with_tools(system: str, messages: list, max_rounds: int = 5) -> str:
+    """Call Anthropic with tool support, looping until Claude is done.
+
+    Returns the final text reply.
+    """
+    for _ in range(max_rounds):
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            system=system,
+            messages=messages,
+            tools=TOOLS,
+            max_tokens=1024,
+            temperature=0.7,
+        )
+
+        # Collect any text blocks for the final answer
+        text_parts = [b.text for b in response.content if b.type == "text"]
+
+        # If Claude didn't ask to use a tool, we're done
+        if response.stop_reason != "tool_use":
+            return "\n".join(text_parts) if text_parts else ""
+
+        # Process every tool_use block in the response
+        tool_results = []
+        for block in response.content:
+            if block.type != "tool_use":
+                continue
+            logging.info("TOOL CALL: %s(%s)", block.name, json.dumps(block.input))
+            result_str = _execute_tool(block.name, block.input)
+            logging.info("TOOL RESULT: %s", result_str)
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result_str,
+                }
+            )
+
+        # Append the assistant turn and the tool results, then loop
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": tool_results})
+
+    # Safety net — if we hit max_rounds, return whatever text we have
+    return "\n".join(text_parts) if text_parts else "I'm sorry, something went wrong."
+
+
+def generate_bot_response(message, customer_name=None, customer_email=None):
     """Run Pinecone similarity search + Anthropic completion for a user message."""
     results = search_similar_chats(index, message)
 
@@ -472,18 +570,20 @@ def generate_bot_response(message):
         context += "\nResponse: " + result["metadata"]["response"]
         context += "\n---\n"
 
-    system = SYSTEM_PROMPT + "\n\n" + context
+    system = SYSTEM_PROMPT + "\n\n"
 
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        system=system,
-        messages=[
-            {"role": "user", "content": message},
-        ],
-        max_tokens=256,
-        temperature=0.7,
-    )
-    return response.content[0].text
+    # Include customer info so Claude can greet them by name
+    if customer_name or customer_email:
+        system += "Current customer info:\n"
+        if customer_name:
+            system += f"- Name: {customer_name}\n"
+        if customer_email:
+            system += f"- Email: {customer_email}\n"
+        system += "\n"
+
+    system += context
+
+    return _run_with_tools(system, [{"role": "user", "content": message}])
 
 
 def send_chatwoot_message(account_id, conversation_id, content):
@@ -526,10 +626,16 @@ def chatwoot_webhook():
         _log("webhook.missing_ids", conversation_id=conversation_id, account_id=account_id)
         return jsonify({"error": "missing conversation_id or account_id"}), 400
 
-    _log("webhook.incoming", account_id=account_id, conversation_id=conversation_id, message=_trunc(content, 200))
+    # Extract customer name/email from the webhook sender data
+    sender = data.get("sender") or {}
+    customer_name = (sender.get("name") or "").strip() or None
+    customer_email = (sender.get("email") or "").strip() or None
+
+    _log("webhook.incoming", account_id=account_id, conversation_id=conversation_id,
+         customer_name=customer_name, customer_email=customer_email, message=_trunc(content, 200))
 
     try:
-        bot_reply = generate_bot_response(content)
+        bot_reply = generate_bot_response(content, customer_name=customer_name, customer_email=customer_email)
         send_chatwoot_message(account_id, conversation_id, bot_reply)
         _log("webhook.replied", account_id=account_id, conversation_id=conversation_id, reply=_trunc(bot_reply, 200))
     except Exception as e:
