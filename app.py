@@ -203,7 +203,8 @@ def _log(event: str, **payload):
         logging.info(json.dumps({"event": event, "log_error": str(e)}))
 
 
-from openai import OpenAI
+import requests as http_requests
+from anthropic import Anthropic
 from pinecone import Pinecone, ServerlessSpec
 from sentence_transformers import SentenceTransformer
 
@@ -221,13 +222,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SPEC_FILENAME = "api.yml"  # your file
 SPEC_PATH = os.path.join(BASE_DIR, SPEC_FILENAME)
 
-# Initialize OpenAI and Pinecone
-client = OpenAI(api_key=os.environ["openai_key"])
+# Initialize Anthropic and Pinecone
+client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 pc = Pinecone(api_key=os.environ["pinecone_key"])
 timer("create pinecone db")
-# Define the Pinecone index name and embedding model
+# Define the Pinecone index name
 db_index_name = "chat-history"
-embedding_model = "text-embedding-ada-002"
 
 # Ensure the index exists or create it if not
 # if db_index_name not in pc.list_indexes():
@@ -241,12 +241,6 @@ embedding_model = "text-embedding-ada-002"
 #            )
 #    )
 index = pc.Index(db_index_name)
-
-
-# Function to generate embeddings using OpenAI
-def get_openai_embedding(text):
-    response = openai.embeddings.create(input=text, model=embedding_model)
-    return response["data"][0]["embedding"]
 
 
 # Load a pre-trained sentence-transformer model
@@ -325,20 +319,18 @@ These are similar chat requests we have received in the past and how we responde
     # print(history)
     # exit()
 
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",  # or use "gpt-3.5-turbo" for cheaper and faster results
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        system=history,
         messages=[
-            {"role": "system", "content": history},
             {"role": "user", "content": query},
         ],
-        max_tokens=100,  # Limit the response length
-        temperature=0.7,  # Adjust creativity (0.0 = deterministic, 1.0 = very creative)
+        max_tokens=256,
+        temperature=0.7,
     )
 
-    # Print the response
-    # print("ChatGPT response:")
-    timer("chatgpt response")
-    return response.choices[0].message.content
+    timer("anthropic response")
+    return response.content[0].text
 
 
 @MyApp.get("/openapi.yaml")
@@ -458,6 +450,93 @@ def assist_suggest():
     return {
         "results": items
     }, 200
+
+
+CHATWOOT_URL = os.environ.get("CHATWOOT_URL", "https://chat.inceptify.com")
+CHATWOOT_BOT_TOKEN = os.environ.get("CHATWOOT_BOT_TOKEN", "")
+
+SYSTEM_PROMPT = (
+    "You are a TradelineWorks.com support chat agent. Keep responses short and concise. "
+    "I'll give you previous chat requests we've received and how we responded to help you. "
+    "Try to stay with the provided style and content."
+)
+
+
+def generate_bot_response(message):
+    """Run Pinecone similarity search + Anthropic completion for a user message."""
+    results = search_similar_chats(index, message)
+
+    context = "These are similar chat requests we have received in the past and how we responded to each:\n"
+    for result in results["matches"]:
+        context += "\nChat: " + result["metadata"]["chat_message"]
+        context += "\nResponse: " + result["metadata"]["response"]
+        context += "\n---\n"
+
+    system = SYSTEM_PROMPT + "\n\n" + context
+
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        system=system,
+        messages=[
+            {"role": "user", "content": message},
+        ],
+        max_tokens=256,
+        temperature=0.7,
+    )
+    return response.content[0].text
+
+
+def send_chatwoot_message(account_id, conversation_id, content):
+    """Send a reply back to a Chatwoot conversation."""
+    url = f"{CHATWOOT_URL}/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages"
+    headers = {
+        "Content-Type": "application/json",
+        "api_access_token": CHATWOOT_BOT_TOKEN,
+    }
+    payload = {"content": content}
+    resp = http_requests.post(url, json=payload, headers=headers, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+@MyApp.route("/webhook", methods=["POST"])
+def chatwoot_webhook():
+    """Handle incoming Chatwoot webhook events."""
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "invalid payload"}), 400
+
+    event = data.get("event")
+    if event != "message_created":
+        return jsonify({"status": "ignored", "reason": "not message_created"}), 200
+
+    message_type = data.get("message_type")
+    if message_type != "incoming":
+        return jsonify({"status": "ignored", "reason": "not incoming"}), 200
+
+    content = (data.get("content") or "").strip()
+    if not content:
+        return jsonify({"status": "ignored", "reason": "empty message"}), 200
+
+    conversation = data.get("conversation") or {}
+    conversation_id = conversation.get("id") or data.get("conversation", {}).get("id")
+    account_id = data.get("account", {}).get("id")
+
+    if not conversation_id or not account_id:
+        _log("webhook.missing_ids", conversation_id=conversation_id, account_id=account_id)
+        return jsonify({"error": "missing conversation_id or account_id"}), 400
+
+    _log("webhook.incoming", account_id=account_id, conversation_id=conversation_id, message=_trunc(content, 200))
+
+    try:
+        bot_reply = generate_bot_response(content)
+        send_chatwoot_message(account_id, conversation_id, bot_reply)
+        _log("webhook.replied", account_id=account_id, conversation_id=conversation_id, reply=_trunc(bot_reply, 200))
+    except Exception as e:
+        logging.exception("webhook error")
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"status": "ok"}), 200
 
 
 @MyApp.route(

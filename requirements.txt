@@ -1,4 +1,5 @@
-openai
+anthropic
+requests
 pinecone
 sentence-transformers
 flask

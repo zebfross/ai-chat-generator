@@ -1,0 +1,14 @@
+[Unit]
+Description=AI Chat Bot (Flask)
+After=network.target
+
+[Service]
+User=chatwoot
+WorkingDirectory=/home/chatwoot/ai-chat-generator
+EnvironmentFile=/home/chatwoot/ai-chat-generator/.env
+ExecStart=/home/chatwoot/ai-chat-generator/venv/bin/python app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
