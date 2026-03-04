@@ -335,8 +335,8 @@ Rules:
     logging.info("System: %s", history)
     logging.info("User: %s", query)
 
-    reply = _run_with_tools(history, [{"role": "user", "content": query}],
-                            customer_email=customer_email)
+    reply, _ = _run_with_tools(history, [{"role": "user", "content": query}],
+                              customer_email=customer_email)
 
     logging.info("=== ANTHROPIC RESPONSE ===")
     logging.info("Reply: %s", reply)
@@ -582,7 +582,7 @@ def _execute_tool(name: str, tool_input: dict, customer_email: str = None,
     if name == "reset_password":
         return _tool_reset_password(tool_input, customer_email)
     if name == "transfer_to_agent":
-        return _tool_transfer_to_agent(account_id, conversation_id)
+        return _tool_transfer_to_agent()
     return f"Unknown tool: {name}"
 
 
@@ -688,10 +688,15 @@ def _tool_reset_password(tool_input: dict, customer_email: str = None) -> str:
     return f"A password-reset email has been sent to {email}."
 
 
-def _tool_transfer_to_agent(account_id: int, conversation_id: int) -> str:
-    """Toggle conversation status to 'open' so human agents can pick it up."""
-    if not account_id or not conversation_id:
-        return "Error: missing account or conversation ID for transfer."
+def _tool_transfer_to_agent() -> str:
+    """Return success text — actual status toggle is deferred until after the
+    farewell message is sent (otherwise the bot token can't post to an 'open'
+    conversation)."""
+    return "Conversation transferred to a live agent."
+
+
+def _toggle_conversation_open(account_id: int, conversation_id: int):
+    """Toggle a Chatwoot conversation from 'pending' to 'open'."""
     url = (
         f"{CHATWOOT_URL}/api/v1/accounts/{account_id}"
         f"/conversations/{conversation_id}/toggle_status"
@@ -704,18 +709,17 @@ def _tool_transfer_to_agent(account_id: int, conversation_id: int) -> str:
         resp = http_requests.post(url, json={"status": "open"}, headers=headers, timeout=10)
         resp.raise_for_status()
     except Exception as e:
-        logging.exception("transfer_to_agent error")
-        return f"Error transferring to agent: {e}"
-    return "Conversation transferred to a live agent."
+        logging.exception("toggle_conversation_open error")
 
 
 def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
                     customer_email: str = None, account_id: int = None,
-                    conversation_id: int = None) -> str:
+                    conversation_id: int = None) -> tuple:
     """Call Anthropic with tool support, looping until Claude is done.
 
-    Returns the final text reply.
+    Returns (reply_text, transfer_requested).
     """
+    transfer_requested = False
     for _ in range(max_rounds):
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
@@ -731,7 +735,8 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
 
         # If Claude didn't ask to use a tool, we're done
         if response.stop_reason != "tool_use":
-            return "\n".join(text_parts) if text_parts else ""
+            text = "\n".join(text_parts) if text_parts else ""
+            return text, transfer_requested
 
         # Process every tool_use block in the response
         tool_results = []
@@ -739,6 +744,8 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
             if block.type != "tool_use":
                 continue
             logging.info("TOOL CALL: %s(%s)", block.name, json.dumps(block.input))
+            if block.name == "transfer_to_agent":
+                transfer_requested = True
             result_str = _execute_tool(block.name, block.input, customer_email,
                                        account_id=account_id, conversation_id=conversation_id)
             logging.info("TOOL RESULT: %s", result_str)
@@ -755,7 +762,8 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
         messages.append({"role": "user", "content": tool_results})
 
     # Safety net — if we hit max_rounds, return whatever text we have
-    return "\n".join(text_parts) if text_parts else "I'm sorry, something went wrong."
+    text = "\n".join(text_parts) if text_parts else "I'm sorry, something went wrong."
+    return text, transfer_requested
 
 
 def generate_bot_response(message, customer_name=None, customer_email=None,
@@ -797,8 +805,9 @@ def generate_bot_response(message, customer_name=None, customer_email=None,
     else:
         messages = [{"role": "user", "content": message}]
 
-    return _run_with_tools(system, messages, customer_email=customer_email,
-                           account_id=account_id, conversation_id=conversation_id)
+    reply, transfer = _run_with_tools(system, messages, customer_email=customer_email,
+                                      account_id=account_id, conversation_id=conversation_id)
+    return reply, transfer
 
 
 def fetch_conversation_messages(account_id, conversation_id):
@@ -901,13 +910,19 @@ def chatwoot_webhook():
          history_len=len(conversation_history), message=_trunc(content, 200))
 
     try:
-        bot_reply = generate_bot_response(
+        bot_reply, transfer_requested = generate_bot_response(
             content, customer_name=customer_name, customer_email=customer_email,
             conversation_history=conversation_history,
             account_id=account_id, conversation_id=conversation_id,
         )
         send_chatwoot_message(account_id, conversation_id, bot_reply)
         _log("webhook.replied", account_id=account_id, conversation_id=conversation_id, reply=_trunc(bot_reply, 200))
+
+        # Toggle status AFTER sending the farewell message (bot token can't
+        # post to "open" conversations)
+        if transfer_requested:
+            _toggle_conversation_open(account_id, conversation_id)
+            _log("webhook.transferred", account_id=account_id, conversation_id=conversation_id)
     except Exception as e:
         logging.exception("webhook error")
         return jsonify({"error": str(e)}), 500
