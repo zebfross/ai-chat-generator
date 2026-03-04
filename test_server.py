@@ -204,12 +204,16 @@ def send_webhook(
     conversation_id=1,
     account_id=1,
     conversation_status="pending",
+    inbox_id=2,
 ):
+    conversation = {"id": conversation_id, "status": conversation_status}
+    if inbox_id is not None:
+        conversation["inbox_id"] = inbox_id
     payload = {
         "event": "message_created",
         "message_type": "incoming",
         "content": content,
-        "conversation": {"id": conversation_id, "status": conversation_status},
+        "conversation": conversation,
         "account": {"id": account_id},
         "sender": {"name": sender_name, "email": sender_email},
     }
@@ -602,21 +606,115 @@ def test_transfer_to_agent():
     print(f"  Reply: {replies[0]['content'][:120]}")
 
 
-def test_ignored_when_not_pending():
-    """Webhook should ignore messages when conversation status is not 'pending'."""
+def test_email_channel_uses_email_prompt():
+    """Verify that messages from the email inbox use the EMAIL_SYSTEM_PROMPT."""
+    clear_chatwoot()
+    clear_anthropic()
+    set_chatwoot_history([])
+    set_anthropic_responses([
+        _make_text_response(
+            "Hi John,\n\nThank you for reaching out. I'd be happy to help.\n\n"
+            "Best regards,\nTradelineWorks Support"
+        ),
+    ])
+
+    # Send webhook with the email inbox_id (1)
+    resp = send_webhook(
+        "I have a question about your tradeline services.",
+        sender_name="John",
+        sender_email="john@example.com",
+        inbox_id=1,
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+
+    reqs = get_anthropic_requests()
+    assert len(reqs) == 1, f"Expected 1 Anthropic request, got {len(reqs)}"
+
+    system = _flatten_system(reqs[0].get("system", ""))
+
+    # Should use the email prompt, not the chat prompt
+    assert "responding via email" in system, (
+        f"Email system prompt not found. System prompt:\n{system[:400]}"
+    )
+    assert "plain text" in system.lower(), (
+        f"Email prompt should mention plain text:\n{system[:400]}"
+    )
+    # Should NOT contain the chat-specific instructions
+    assert "Keep responses short and concise" not in system, (
+        f"Chat system prompt found when email prompt expected:\n{system[:400]}"
+    )
+
+    # Reply should have been forwarded to Chatwoot
+    replies = get_chatwoot_replies()
+    assert len(replies) >= 1, "No reply sent to Chatwoot"
+
+    print(f"  System prompt contains 'responding via email': OK")
+    print(f"  System prompt does NOT contain chat instructions: OK")
+    print(f"  Reply: {replies[0]['content'][:100]}")
+
+
+def test_chat_channel_uses_chat_prompt():
+    """Verify that messages from a non-email inbox still use the regular SYSTEM_PROMPT."""
+    clear_chatwoot()
+    clear_anthropic()
+    set_chatwoot_history([])
+    set_anthropic_responses([
+        _make_text_response("Hi! How can I help you?"),
+    ])
+
+    # Send webhook with a non-email inbox_id (2 = web widget)
+    resp = send_webhook(
+        "Hi there!",
+        sender_name="Jane",
+        sender_email="jane@example.com",
+        inbox_id=2,
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+
+    reqs = get_anthropic_requests()
+    assert len(reqs) == 1, f"Expected 1 Anthropic request, got {len(reqs)}"
+
+    system = _flatten_system(reqs[0].get("system", ""))
+
+    # Should use the chat prompt
+    assert "Keep responses short and concise" in system, (
+        f"Chat system prompt not found. System prompt:\n{system[:400]}"
+    )
+    # Should NOT contain email-specific instructions
+    assert "responding via email" not in system, (
+        f"Email system prompt found when chat prompt expected:\n{system[:400]}"
+    )
+
+    print(f"  System prompt contains chat instructions: OK")
+    print(f"  System prompt does NOT contain email instructions: OK")
+
+
+def test_ignored_when_assigned_to_agent():
+    """Webhook should ignore messages when conversation is assigned to a human agent."""
     clear_chatwoot()
     clear_anthropic()
     set_chatwoot_history([])
 
-    resp = send_webhook(
-        "Hello, are you there?",
-        conversation_status="open",
-    )
+    # Send a webhook with an assignee in the conversation
+    payload = {
+        "event": "message_created",
+        "message_type": "incoming",
+        "content": "Hello, are you there?",
+        "conversation": {
+            "id": 1,
+            "status": "open",
+            "inbox_id": 2,
+            "assignee": {"id": 5, "name": "Agent Smith"},
+        },
+        "account": {"id": 1},
+        "sender": {"name": "John", "email": "john@example.com"},
+    }
+    resp = requests.post(f"{BOT_URL}/webhook", json=payload, timeout=120)
     assert resp.status_code == 200
 
     data = resp.json()
     assert "ignored" in data.get("status", ""), f"Expected ignored status, got: {data}"
-    assert "open" in data.get("reason", ""), f"Expected reason to mention 'open', got: {data}"
+    assert "agent" in data.get("reason", ""), f"Expected reason to mention 'agent', got: {data}"
 
     # No Anthropic request should have been made
     reqs = get_anthropic_requests()
@@ -695,7 +793,9 @@ def main():
         ("Search tradelines via WP API", test_search_tradelines_via_wp),
         ("Order lookup via WP API", test_order_lookup_via_wp),
         ("Transfer to agent", test_transfer_to_agent),
-        ("Ignored when not pending", test_ignored_when_not_pending),
+        ("Email channel uses email prompt", test_email_channel_uses_email_prompt),
+        ("Chat channel uses chat prompt", test_chat_channel_uses_chat_prompt),
+        ("Ignored when assigned to agent", test_ignored_when_assigned_to_agent),
         ("Empty message — no API calls", test_empty_message_no_api_call),
     ]
 

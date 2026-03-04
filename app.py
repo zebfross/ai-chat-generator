@@ -467,6 +467,7 @@ def assist_suggest():
 CHATWOOT_URL = os.environ.get("CHATWOOT_URL", "https://chat.inceptify.com")
 CHATWOOT_BOT_TOKEN = os.environ.get("CHATWOOT_BOT_TOKEN", "")
 CHATWOOT_USER_TOKEN = os.environ.get("CHATWOOT_USER_TOKEN", CHATWOOT_BOT_TOKEN)
+EMAIL_INBOX_ID = int(os.environ.get("EMAIL_INBOX_ID", "0"))
 
 SYSTEM_PROMPT = (
     "You are a TradelineWorks.com support chat agent. Keep responses short and concise. "
@@ -475,6 +476,20 @@ SYSTEM_PROMPT = (
     "If you cannot help the customer, or they explicitly ask for a human agent, "
     "use the transfer_to_agent tool to hand the conversation to a live agent.\n\n"
     "When showing tradeline results, preserve the markdown links exactly as provided by the tool."
+)
+
+EMAIL_SYSTEM_PROMPT = (
+    "You are a TradelineWorks.com customer support representative responding via email. "
+    "Write complete, self-contained responses — do not assume back-and-forth like a live chat.\n\n"
+    "Guidelines:\n"
+    "- Use a professional, friendly tone appropriate for email.\n"
+    "- Start with a greeting (e.g. \"Hi [Name],\") and end with a sign-off "
+    "(e.g. \"Best regards,\\nTradelineWorks Support\").\n"
+    "- Write in plain text — no markdown formatting, no bullet points with dashes.\n"
+    "- Provide thorough, helpful answers in paragraph form.\n"
+    "- If you cannot help the customer, or they explicitly ask for a human agent, "
+    "use the transfer_to_agent tool to hand the conversation to a live agent.\n\n"
+    "I'll give you previous chat requests we've received and how we responded for reference."
 )
 
 # ---------------------------------------------------------------------------
@@ -769,7 +784,7 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
 
 def generate_bot_response(message, customer_name=None, customer_email=None,
                           conversation_history=None, account_id=None,
-                          conversation_id=None):
+                          conversation_id=None, inbox_id=None):
     """Run Pinecone similarity search + Anthropic completion for a user message."""
     results = search_similar_chats(index, message)
 
@@ -779,7 +794,9 @@ def generate_bot_response(message, customer_name=None, customer_email=None,
         context += "\nResponse: " + result["metadata"]["response"]
         context += "\n---\n"
 
-    system = SYSTEM_PROMPT + "\n\n"
+    is_email = EMAIL_INBOX_ID and inbox_id == EMAIL_INBOX_ID
+    base_prompt = EMAIL_SYSTEM_PROMPT if is_email else SYSTEM_PROMPT
+    system = base_prompt + "\n\n"
 
     # Include customer info so Claude can greet them by name
     if customer_name or customer_email:
@@ -887,12 +904,12 @@ def chatwoot_webhook():
     conversation = data.get("conversation") or {}
     conversation_id = conversation.get("id") or data.get("conversation", {}).get("id")
     account_id = data.get("account", {}).get("id")
+    inbox_id = conversation.get("inbox_id")
 
-    # Only respond to conversations in "pending" status (bot territory).
-    # Once a conversation is "open", human agents handle it.
-    conv_status = conversation.get("status")
-    if conv_status and conv_status != "pending":
-        return jsonify({"status": "ignored", "reason": f"conversation is {conv_status}"}), 200
+    # Skip if a human agent is assigned — let them handle it.
+    assignee = conversation.get("assignee")
+    if assignee:
+        return jsonify({"status": "ignored", "reason": "assigned to agent"}), 200
 
     if not conversation_id or not account_id:
         _log("webhook.missing_ids", conversation_id=conversation_id, account_id=account_id)
@@ -907,7 +924,7 @@ def chatwoot_webhook():
     conversation_history = fetch_conversation_messages(account_id, conversation_id)
 
     _log("webhook.incoming", account_id=account_id, conversation_id=conversation_id,
-         customer_name=customer_name, customer_email=customer_email,
+         inbox_id=inbox_id, customer_name=customer_name, customer_email=customer_email,
          history_len=len(conversation_history), message=_trunc(content, 200))
 
     try:
@@ -915,6 +932,7 @@ def chatwoot_webhook():
             content, customer_name=customer_name, customer_email=customer_email,
             conversation_history=conversation_history,
             account_id=account_id, conversation_id=conversation_id,
+            inbox_id=inbox_id,
         )
         send_chatwoot_message(account_id, conversation_id, bot_reply)
         _log("webhook.replied", account_id=account_id, conversation_id=conversation_id, reply=_trunc(bot_reply, 200))
