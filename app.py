@@ -616,7 +616,7 @@ def _tool_search_tradelines(tool_input: dict) -> str:
         lines.append(
             f"- {c['name']} | Age: {c['age_months']} months | "
             f"Limit: ${int(float(c['limit'])):,} | Price: ${c['price']} | "
-            f"Stock: {c['stock_remaining']}"
+            f"Stock: {c['stock_remaining']} | URL: {c['url']}"
         )
     return "\n".join(lines)
 
