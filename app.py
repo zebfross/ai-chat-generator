@@ -882,6 +882,48 @@ def send_chatwoot_message(account_id, conversation_id, content):
     return resp.json()
 
 
+def send_chatwoot_private_message(account_id, conversation_id, content):
+    """Send a private note (whisper) visible only to agents."""
+    url = f"{CHATWOOT_URL}/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages"
+    headers = {
+        "Content-Type": "application/json",
+        "api_access_token": CHATWOOT_USER_TOKEN,
+    }
+    payload = {"content": content, "private": True, "message_type": "outgoing"}
+    resp = http_requests.post(url, json=payload, headers=headers, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def generate_handoff_summary(conversation_history):
+    """Generate a brief summary of the conversation for the receiving agent."""
+    if not conversation_history:
+        return "No conversation history available."
+
+    # Build a condensed version of the conversation for summarization
+    convo_text = ""
+    for msg in conversation_history:
+        role = "Customer" if msg["role"] == "user" else "Bot"
+        convo_text += f"{role}: {msg['content']}\n"
+
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            system=(
+                "Summarize this customer support conversation for a human agent "
+                "who is taking over. Focus on: what the customer needs, what was already tried/discussed, "
+                "and any important details (email, order numbers, etc). Be concise."
+            ),
+            messages=[{"role": "user", "content": convo_text}],
+            max_tokens=200,
+            temperature=0,
+        )
+        return response.content[0].text
+    except Exception as e:
+        logging.exception("generate_handoff_summary error")
+        return "Bot was unable to generate a summary of this conversation."
+
+
 @MyApp.route("/webhook", methods=["POST"])
 def chatwoot_webhook():
     """Handle incoming Chatwoot webhook events."""
@@ -940,8 +982,15 @@ def chatwoot_webhook():
         # Toggle status AFTER sending the farewell message (bot token can't
         # post to "open" conversations)
         if transfer_requested:
+            # Generate and send a private summary for the receiving agent
+            summary = generate_handoff_summary(conversation_history)
             _toggle_conversation_open(account_id, conversation_id)
-            _log("webhook.transferred", account_id=account_id, conversation_id=conversation_id)
+            send_chatwoot_private_message(
+                account_id, conversation_id,
+                f"**Bot Summary:** {summary}"
+            )
+            _log("webhook.transferred", account_id=account_id, conversation_id=conversation_id,
+                 summary=_trunc(summary, 200))
     except Exception as e:
         logging.exception("webhook error")
         return jsonify({"error": str(e)}), 500
