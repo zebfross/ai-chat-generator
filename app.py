@@ -570,6 +570,45 @@ TOOLS = [
         },
     },
     {
+        "name": "cancel_order",
+        "description": (
+            "Cancel a customer's tradeline order. "
+            "Use this when a customer wants to cancel a specific order. "
+            "Requires the customer's email and the order ID."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "description": "The customer's email address.",
+                },
+                "order_id": {
+                    "type": "number",
+                    "description": "The order ID to cancel.",
+                },
+            },
+            "required": ["email", "order_id"],
+        },
+    },
+    {
+        "name": "seller_payouts",
+        "description": (
+            "Look up a seller's payout history and pending payouts. "
+            "Use this when a seller asks about their payouts, earnings, or payments."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "description": "The seller's email address.",
+                },
+            },
+            "required": ["email"],
+        },
+    },
+    {
         "name": "transfer_to_agent",
         "description": (
             "Transfer the conversation to a live human agent. "
@@ -597,6 +636,10 @@ def _execute_tool(name: str, tool_input: dict, customer_email: str = None,
         return _tool_order_lookup(tool_input, customer_email)
     if name == "reset_password":
         return _tool_reset_password(tool_input, customer_email)
+    if name == "cancel_order":
+        return _tool_cancel_order(tool_input, customer_email)
+    if name == "seller_payouts":
+        return _tool_seller_payouts(tool_input, customer_email)
     if name == "transfer_to_agent":
         return _tool_transfer_to_agent()
     return f"Unknown tool: {name}"
@@ -702,6 +745,68 @@ def _tool_reset_password(tool_input: dict, customer_email: str = None) -> str:
         return f"Error sending password reset: {e}"
 
     return f"A password-reset email has been sent to {email}."
+
+
+def _tool_cancel_order(tool_input: dict, customer_email: str = None) -> str:
+    """Cancel an order via the TW API."""
+    email = tool_input.get("email", "").strip()
+    order_id = tool_input.get("order_id")
+    if not email or not order_id:
+        return "Error: both email and order_id are required."
+    if not customer_email:
+        return "Error: cannot cancel order — customer email is not verified for this session."
+    if email.lower() != customer_email.lower():
+        return f"Error: for security, I can only cancel orders for the current customer ({customer_email})."
+
+    try:
+        resp = http_requests.post(
+            f"{TW_BASE_URL}/wp-json/tw/v1/bot/cancel-order",
+            json={"email": email, "order_id": order_id},
+            headers=_tw_headers(),
+            timeout=15,
+            verify=TW_VERIFY_SSL,
+        )
+        if resp.status_code == 404:
+            return f"Order {order_id} not found for {email}."
+        resp.raise_for_status()
+        result = resp.json()
+    except Exception as e:
+        logging.exception("cancel_order error")
+        return f"Error cancelling order: {e}"
+
+    return result.get("message", f"Order {order_id} has been cancelled.")
+
+
+def _tool_seller_payouts(tool_input: dict, customer_email: str = None) -> str:
+    """Look up seller payouts via the TW API."""
+    email = tool_input.get("email", "").strip()
+    if not email:
+        return "Error: no email address provided."
+    if not customer_email:
+        return "Error: cannot look up payouts — customer email is not verified for this session."
+    if email.lower() != customer_email.lower():
+        return f"Error: for security, I can only look up payouts for the current customer ({customer_email})."
+
+    try:
+        resp = http_requests.get(
+            f"{TW_BASE_URL}/wp-json/tw/v1/bot/seller-payouts",
+            params={"email": email},
+            headers=_tw_headers(),
+            timeout=15,
+            verify=TW_VERIFY_SSL,
+        )
+        if resp.status_code == 404:
+            return f"No seller account found for {email}."
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logging.exception("seller_payouts error")
+        return f"Error looking up payouts: {e}"
+
+    if not data:
+        return f"No payout information found for {email}."
+
+    return data.get("message", str(data))
 
 
 def _tool_transfer_to_agent() -> str:
