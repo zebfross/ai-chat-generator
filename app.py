@@ -773,14 +773,17 @@ def _tool_cancel_order(tool_input: dict, customer_email: str = None) -> str:
     try:
         resp = http_requests.post(
             f"{TW_BASE_URL}/wp-json/tw/v1/bot/cancel-order",
-            json={"email": email, "order_id": order_id},
+            json={"email": email, "order_id": int(order_id)},
             headers=_tw_headers(),
             timeout=15,
             verify=TW_VERIFY_SSL,
         )
         if resp.status_code == 404:
             return f"Order {order_id} not found for {email}."
-        resp.raise_for_status()
+        if not resp.ok:
+            body = resp.text[:300]
+            logging.error("cancel_order %s: %s", resp.status_code, body)
+            return f"Error cancelling order: {body}"
         result = resp.json()
     except Exception as e:
         logging.exception("cancel_order error")
@@ -809,7 +812,10 @@ def _tool_seller_payouts(tool_input: dict, customer_email: str = None) -> str:
         )
         if resp.status_code == 404:
             return f"No seller account found for {email}."
-        resp.raise_for_status()
+        if not resp.ok:
+            body = resp.text[:300]
+            logging.error("seller_payouts %s: %s", resp.status_code, body)
+            return f"Error looking up payouts: {body}"
         data = resp.json()
     except Exception as e:
         logging.exception("seller_payouts error")
