@@ -1,3 +1,4 @@
+import collections
 import json
 import logging
 import os
@@ -25,6 +26,9 @@ MyApp = Flask(__name__)
 
 # Optional: set up root logger if you haven't already (Heroku reads stdout)
 logging.basicConfig(level=logging.INFO)
+
+# In-memory ring buffer for recent tool calls (viewable at /debug/logs)
+TOOL_LOG = collections.deque(maxlen=50)
 
 CORS(
     MyApp,
@@ -277,6 +281,12 @@ def search_similar_chats(index, query, top_k=5):
 def load_chat_history(file_path):
     with open(file_path, "r", encoding="utf-8", errors="ignore") as file:
         return json.load(file)
+
+
+@MyApp.route("/debug/logs")
+def debug_logs():
+    """Return recent tool call log entries for debugging."""
+    return jsonify(list(TOOL_LOG))
 
 
 @MyApp.route("/chat")
@@ -859,6 +869,13 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
         # If Claude didn't ask to use a tool, we're done
         if response.stop_reason != "tool_use":
             text = "\n".join(text_parts) if text_parts else ""
+            TOOL_LOG.append({
+                "ts": datetime.utcnow().isoformat(),
+                "tool": None,
+                "stop_reason": response.stop_reason,
+                "reply_preview": text[:200],
+                "customer_email": customer_email,
+            })
             return text, transfer_requested
 
         # Process every tool_use block in the response
@@ -872,6 +889,13 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
             result_str = _execute_tool(block.name, block.input, customer_email,
                                        account_id=account_id, conversation_id=conversation_id)
             logging.info("TOOL RESULT: %s", result_str)
+            TOOL_LOG.append({
+                "ts": datetime.utcnow().isoformat(),
+                "tool": block.name,
+                "input": block.input,
+                "result": result_str[:500],
+                "customer_email": customer_email,
+            })
             tool_results.append(
                 {
                     "type": "tool_result",
