@@ -473,7 +473,8 @@ SYSTEM_PROMPT = (
     "I'll give you previous chat requests we've received and how we responded to help you. "
     "Try to stay with the provided style and content.\n\n"
     "If you cannot help the customer, or they explicitly ask for a human agent, "
-    "use the transfer_to_agent tool to hand the conversation to a live agent."
+    "use the transfer_to_agent tool to hand the conversation to a live agent.\n\n"
+    "When showing tradeline results, preserve the markdown links exactly as provided by the tool."
 )
 
 # ---------------------------------------------------------------------------
@@ -614,9 +615,9 @@ def _tool_search_tradelines(tool_input: dict) -> str:
     lines = [f"Found {len(cards)} tradeline(s):\n"]
     for c in cards:
         lines.append(
-            f"- {c['name']} | Age: {c['age_months']} months | "
-            f"Limit: ${int(float(c['limit'])):,} | Price: ${c['price']} | "
-            f"Stock: {c['stock_remaining']} | URL: {c['url']}"
+            f"- [{c['name']} – ${int(float(c['limit'])):,} limit]({c['url']}) | "
+            f"Age: {c['age_months']} months | Price: ${c['price']} | "
+            f"Stock: {c['stock_remaining']}"
         )
     return "\n".join(lines)
 
