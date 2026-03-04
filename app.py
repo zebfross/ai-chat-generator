@@ -704,7 +704,7 @@ def _toggle_conversation_open(account_id: int, conversation_id: int):
     )
     headers = {
         "Content-Type": "application/json",
-        "api_access_token": CHATWOOT_BOT_TOKEN,
+        "api_access_token": CHATWOOT_USER_TOKEN,
     }
     try:
         resp = http_requests.post(url, json={"status": "open"}, headers=headers, timeout=10)
