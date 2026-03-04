@@ -1092,6 +1092,14 @@ def chatwoot_webhook():
     sender = data.get("sender") or {}
     customer_name = (sender.get("name") or "").strip() or None
     customer_email = (sender.get("email") or "").strip() or None
+    logging.info("WEBHOOK SENDER: %s", json.dumps(sender, default=str))
+    TOOL_LOG.append({
+        "ts": datetime.utcnow().isoformat(),
+        "tool": "_webhook_received",
+        "sender": {k: sender.get(k) for k in ("id", "name", "email", "phone_number", "identifier")},
+        "customer_email": customer_email,
+        "conversation_id": conversation_id,
+    })
 
     # Fetch prior messages so Claude sees the full conversation
     conversation_history = fetch_conversation_messages(account_id, conversation_id)
