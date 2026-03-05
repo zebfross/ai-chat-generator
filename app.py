@@ -1033,7 +1033,7 @@ def send_chatwoot_private_message(account_id, conversation_id, content):
         "Content-Type": "application/json",
         "api_access_token": CHATWOOT_USER_TOKEN,
     }
-    payload = {"content": content, "private": True, "message_type": "outgoing"}
+    payload = {"content": content, "private": True}
     resp = http_requests.post(url, json=payload, headers=headers, timeout=10)
     resp.raise_for_status()
     return resp.json()
