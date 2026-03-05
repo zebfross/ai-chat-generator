@@ -12,6 +12,9 @@ else
     cd "$APP_DIR" && sudo -u chatwoot git pull
 fi
 
+# Install system dependencies
+apt-get install -y tesseract-ocr
+
 # Create venv and install deps
 cd "$APP_DIR"
 sudo -u chatwoot python3 -m venv venv

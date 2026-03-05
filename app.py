@@ -1226,6 +1226,25 @@ def chatwoot_webhook():
     return jsonify({"status": "ok"}), 200
 
 
+@MyApp.route("/ocr", methods=["POST"])
+def ocr_image():
+    """Accept an image file and return OCR text via Tesseract."""
+    import pytesseract
+    from PIL import Image
+
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided. Send as multipart form field 'file'."}), 400
+
+    file = request.files["file"]
+    try:
+        img = Image.open(file.stream)
+        text = pytesseract.image_to_string(img).strip()
+        return jsonify({"text": text})
+    except Exception as e:
+        logging.exception("OCR error")
+        return jsonify({"error": str(e)}), 500
+
+
 @MyApp.route(
     "/",
     defaults={"path": ""},
