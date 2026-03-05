@@ -1238,8 +1238,20 @@ def ocr_image():
     file = request.files["file"]
     try:
         img = Image.open(file.stream)
-        text = pytesseract.image_to_string(img).strip()
-        return jsonify({"text": text})
+
+        # Auto-rotate based on EXIF orientation tag
+        from PIL import ImageOps
+        img = ImageOps.exif_transpose(img)
+
+        # Try all four rotations and pick the one with the most text
+        best_text = ""
+        for angle in (0, 90, 180, 270):
+            rotated = img.rotate(angle, expand=True) if angle else img
+            text = pytesseract.image_to_string(rotated, config="--psm 6").strip()
+            if len(text) > len(best_text):
+                best_text = text
+
+        return jsonify({"text": best_text})
     except Exception as e:
         logging.exception("OCR error")
         return jsonify({"error": str(e)}), 500
