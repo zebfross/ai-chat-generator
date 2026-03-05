@@ -27,8 +27,21 @@ MyApp = Flask(__name__)
 # Optional: set up root logger if you haven't already (Heroku reads stdout)
 logging.basicConfig(level=logging.INFO)
 
-# In-memory ring buffer for recent tool calls (viewable at /debug/logs)
+# In-memory ring buffer for recent requests (viewable at /debug/logs)
 TOOL_LOG = collections.deque(maxlen=50)
+# Thread-local trace for the current request
+_current_trace = None
+
+
+def _trace_event(event_type, **data):
+    """Append an event to the current request trace."""
+    global _current_trace
+    if _current_trace is not None:
+        _current_trace["events"].append({
+            "type": event_type,
+            "ts": datetime.utcnow().isoformat(),
+            **data,
+        })
 
 CORS(
     MyApp,
@@ -285,8 +298,10 @@ def load_chat_history(file_path):
 
 @MyApp.route("/debug/logs")
 def debug_logs():
-    """Return recent tool call log entries for debugging."""
-    return jsonify(list(TOOL_LOG))
+    """Return recent request traces for debugging."""
+    limit = request.args.get("limit", 10, type=int)
+    traces = list(TOOL_LOG)[-limit:]
+    return jsonify(traces)
 
 
 @MyApp.route("/chat")
@@ -866,7 +881,12 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
     Returns (reply_text, transfer_requested).
     """
     transfer_requested = False
-    for _ in range(max_rounds):
+    _trace_event("anthropic_request", system=system[:1000],
+                 messages=[{"role": m["role"], "content": str(m.get("content", ""))[:300]}
+                           for m in messages[-6:]],
+                 tool_names=[t["name"] for t in TOOLS])
+
+    for round_num in range(max_rounds):
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
             system=system,
@@ -879,16 +899,22 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
         # Collect any text blocks for the final answer
         text_parts = [b.text for b in response.content if b.type == "text"]
 
+        # Summarize response content for trace
+        response_summary = []
+        for block in response.content:
+            if block.type == "text":
+                response_summary.append({"type": "text", "text": block.text[:300]})
+            elif block.type == "tool_use":
+                response_summary.append({"type": "tool_use", "name": block.name, "input": block.input})
+
+        _trace_event("anthropic_response", round=round_num,
+                     stop_reason=response.stop_reason,
+                     content=response_summary,
+                     usage={"input": response.usage.input_tokens, "output": response.usage.output_tokens})
+
         # If Claude didn't ask to use a tool, we're done
         if response.stop_reason != "tool_use":
             text = "\n".join(text_parts) if text_parts else ""
-            TOOL_LOG.append({
-                "ts": datetime.utcnow().isoformat(),
-                "tool": None,
-                "stop_reason": response.stop_reason,
-                "reply_preview": text[:200],
-                "customer_email": customer_email,
-            })
             return text, transfer_requested
 
         # Process every tool_use block in the response
@@ -896,19 +922,12 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
         for block in response.content:
             if block.type != "tool_use":
                 continue
-            logging.info("TOOL CALL: %s(%s)", block.name, json.dumps(block.input))
             if block.name == "transfer_to_agent":
                 transfer_requested = True
             result_str = _execute_tool(block.name, block.input, customer_email,
                                        account_id=account_id, conversation_id=conversation_id)
-            logging.info("TOOL RESULT: %s", result_str)
-            TOOL_LOG.append({
-                "ts": datetime.utcnow().isoformat(),
-                "tool": block.name,
-                "input": block.input,
-                "result": result_str[:500],
-                "customer_email": customer_email,
-            })
+            _trace_event("tool_executed", tool=block.name, input=block.input,
+                         result=result_str[:500])
             tool_results.append(
                 {
                     "type": "tool_result",
@@ -1105,21 +1124,26 @@ def chatwoot_webhook():
     sender = data.get("sender") or {}
     customer_name = (sender.get("name") or "").strip() or None
     customer_email = (sender.get("email") or "").strip() or None
-    logging.info("WEBHOOK SENDER: %s", json.dumps(sender, default=str))
-    TOOL_LOG.append({
+
+    # Start a trace for this request
+    global _current_trace
+    _current_trace = {
         "ts": datetime.utcnow().isoformat(),
-        "tool": "_webhook_received",
-        "sender": {k: sender.get(k) for k in ("id", "name", "email", "phone_number", "identifier")},
-        "customer_email": customer_email,
         "conversation_id": conversation_id,
-    })
+        "account_id": account_id,
+        "inbox_id": inbox_id,
+        "message": content,
+        "sender": {k: sender.get(k) for k in ("id", "name", "email", "phone_number", "identifier")},
+        "customer_name": customer_name,
+        "customer_email": customer_email,
+        "assignee": assignee,
+        "events": [],
+    }
 
     # Fetch prior messages so Claude sees the full conversation
     conversation_history = fetch_conversation_messages(account_id, conversation_id)
-
-    _log("webhook.incoming", account_id=account_id, conversation_id=conversation_id,
-         inbox_id=inbox_id, customer_name=customer_name, customer_email=customer_email,
-         history_len=len(conversation_history), message=_trunc(content, 200))
+    _trace_event("history_fetched", message_count=len(conversation_history),
+                 messages=[{"role": m["role"], "content": m["content"][:200]} for m in conversation_history[-10:]])
 
     try:
         bot_reply, transfer_requested = generate_bot_response(
@@ -1129,23 +1153,28 @@ def chatwoot_webhook():
             inbox_id=inbox_id,
         )
         send_chatwoot_message(account_id, conversation_id, bot_reply)
-        _log("webhook.replied", account_id=account_id, conversation_id=conversation_id, reply=_trunc(bot_reply, 200))
+        _trace_event("reply_sent", reply=bot_reply[:500])
 
         # Toggle status AFTER sending the farewell message (bot token can't
         # post to "open" conversations)
         if transfer_requested:
-            # Generate and send a private summary for the receiving agent
             summary = generate_handoff_summary(conversation_history)
             _toggle_conversation_open(account_id, conversation_id)
             send_chatwoot_private_message(
                 account_id, conversation_id,
                 f"**Bot Summary:** {summary}"
             )
-            _log("webhook.transferred", account_id=account_id, conversation_id=conversation_id,
-                 summary=_trunc(summary, 200))
+            _trace_event("handoff", summary=summary[:500])
     except Exception as e:
         logging.exception("webhook error")
+        _trace_event("error", error=str(e))
+        _current_trace["error"] = str(e)
+        TOOL_LOG.append(_current_trace)
+        _current_trace = None
         return jsonify({"error": str(e)}), 500
+
+    TOOL_LOG.append(_current_trace)
+    _current_trace = None
 
     return jsonify({"status": "ok"}), 200
 
