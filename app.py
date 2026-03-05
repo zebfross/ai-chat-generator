@@ -1228,30 +1228,32 @@ def chatwoot_webhook():
 
 @MyApp.route("/ocr", methods=["POST"])
 def ocr_image():
-    """Accept an image file and return OCR text via Tesseract."""
-    import pytesseract
-    from PIL import Image
+    """Accept an image file and return OCR text via AWS Textract."""
+    import boto3
+    from PIL import Image, ImageOps
+    import io
 
     if "file" not in request.files:
         return jsonify({"error": "No file provided. Send as multipart form field 'file'."}), 400
 
     file = request.files["file"]
     try:
+        # Auto-rotate based on EXIF orientation and convert to bytes
         img = Image.open(file.stream)
-
-        # Auto-rotate based on EXIF orientation tag
-        from PIL import ImageOps
         img = ImageOps.exif_transpose(img)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        image_bytes = buf.getvalue()
 
-        # Try all four rotations and pick the one with the most text
-        best_text = ""
-        for angle in (0, 90, 180, 270):
-            rotated = img.rotate(angle, expand=True) if angle else img
-            text = pytesseract.image_to_string(rotated, config="--psm 6").strip()
-            if len(text) > len(best_text):
-                best_text = text
+        textract = boto3.client("textract", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+        response = textract.detect_document_text(Document={"Bytes": image_bytes})
 
-        return jsonify({"text": best_text})
+        lines = [
+            block["Text"]
+            for block in response.get("Blocks", [])
+            if block["BlockType"] == "LINE"
+        ]
+        return jsonify({"text": "\n".join(lines), "lines": lines})
     except Exception as e:
         logging.exception("OCR error")
         return jsonify({"error": str(e)}), 500

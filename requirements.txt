@@ -5,5 +5,5 @@ sentence-transformers
 flask
 pyyaml
 flask-cors
-pytesseract
+boto3
 Pillow
