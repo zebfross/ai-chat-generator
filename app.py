@@ -884,9 +884,9 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
     Returns (reply_text, transfer_requested).
     """
     transfer_requested = False
-    _trace_event("anthropic_request", system=system[:1000],
-                 messages=[{"role": m["role"], "content": str(m.get("content", ""))[:300]}
-                           for m in messages[-6:]],
+    _trace_event("anthropic_request", system=system,
+                 messages=[{"role": m["role"], "content": str(m.get("content", ""))[:500]}
+                           for m in messages[-10:]],
                  tool_names=[t["name"] for t in TOOLS])
 
     for round_num in range(max_rounds):
@@ -954,22 +954,15 @@ def generate_bot_response(message, customer_name=None, customer_email=None,
     """Run Pinecone similarity search + Anthropic completion for a user message."""
     results = search_similar_chats(index, message)
 
-    # Only include matches with a meaningful similarity score
-    MIN_SIMILARITY = 0.80
-    good_matches = [m for m in results["matches"] if m.get("score", 0) >= MIN_SIMILARITY]
-
     _trace_event("pinecone_search", query=message,
-                 all_scores=[{"score": round(m["score"], 3), "chat": m["metadata"]["chat_message"][:100]}
-                             for m in results["matches"]],
-                 used_count=len(good_matches))
+                 matches=[{"score": round(m["score"], 3), "chat": m["metadata"]["chat_message"][:100]}
+                          for m in results["matches"]])
 
-    context = ""
-    if good_matches:
-        context = "These are similar chat requests we have received in the past and how we responded to each:\n"
-        for result in good_matches:
-            context += "\nChat: " + result["metadata"]["chat_message"]
-            context += "\nResponse: " + result["metadata"]["response"]
-            context += "\n---\n"
+    context = "These are similar chat requests we have received in the past and how we responded to each:\n"
+    for result in results["matches"]:
+        context += "\nChat: " + result["metadata"]["chat_message"]
+        context += "\nResponse: " + result["metadata"]["response"]
+        context += "\n---\n"
 
     is_email = EMAIL_INBOX_ID and inbox_id == EMAIL_INBOX_ID
     base_prompt = EMAIL_SYSTEM_PROMPT if is_email else SYSTEM_PROMPT
