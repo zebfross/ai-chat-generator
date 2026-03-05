@@ -492,6 +492,7 @@ def assist_suggest():
 CHATWOOT_URL = os.environ.get("CHATWOOT_URL", "https://chat.inceptify.com")
 CHATWOOT_BOT_TOKEN = os.environ.get("CHATWOOT_BOT_TOKEN", "")
 CHATWOOT_USER_TOKEN = os.environ.get("CHATWOOT_USER_TOKEN", CHATWOOT_BOT_TOKEN)
+CHATWOOT_ACCOUNT_ID = int(os.environ.get("CHATWOOT_ACCOUNT_ID", "3"))
 EMAIL_INBOX_ID = int(os.environ.get("EMAIL_INBOX_ID", "0"))
 
 SYSTEM_PROMPT = (
@@ -868,10 +869,33 @@ def _tool_seller_payouts(tool_input: dict, customer_email: str = None) -> str:
     return data.get("message", str(data))
 
 
+def _get_online_agents() -> list:
+    """Return list of agents with availability_status == 'online'."""
+    try:
+        url = f"{CHATWOOT_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/agents"
+        headers = {"api_access_token": CHATWOOT_USER_TOKEN}
+        resp = http_requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        agents = resp.json()
+        return [a for a in agents if a.get("availability_status") == "online"]
+    except Exception as e:
+        logging.exception("_get_online_agents error")
+        return []
+
+
 def _tool_transfer_to_agent() -> str:
-    """Return success text — actual status toggle is deferred until after the
-    farewell message is sent (otherwise the bot token can't post to an 'open'
-    conversation)."""
+    """Check if agents are online before transferring.
+
+    Returns success text if agents are available, otherwise instructs the bot
+    to let the customer know someone will follow up during business hours.
+    """
+    online = _get_online_agents()
+    if not online:
+        return (
+            "No agents are currently online. Let the customer know someone "
+            "will get back to them during business hours (Mon-Fri 9am-6pm EST). "
+            "Do NOT use the transfer_to_agent tool again."
+        )
     return "Conversation transferred to a live agent."
 
 
@@ -941,10 +965,10 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
         for block in response.content:
             if block.type != "tool_use":
                 continue
-            if block.name == "transfer_to_agent":
-                transfer_requested = True
             result_str = _execute_tool(block.name, block.input, customer_email,
                                        account_id=account_id, conversation_id=conversation_id)
+            if block.name == "transfer_to_agent" and not result_str.startswith("No agents"):
+                transfer_requested = True
             _trace_event("tool_executed", tool=block.name, input=block.input,
                          result=result_str[:500])
             tool_results.append(
