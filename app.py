@@ -780,6 +780,13 @@ def _tool_cancel_order(tool_input: dict, customer_email: str = None) -> str:
         )
         if resp.status_code == 404:
             return f"Order {order_id} not found for {email}."
+        if resp.status_code == 400:
+            try:
+                err = resp.json()
+                reason = err.get("code") or err.get("message") or resp.text[:300]
+            except Exception:
+                reason = resp.text[:300]
+            return f"Cannot cancel order {order_id}: {reason}"
         if not resp.ok:
             body = resp.text[:300]
             logging.error("cancel_order %s: %s", resp.status_code, body)
