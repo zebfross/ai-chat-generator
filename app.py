@@ -506,7 +506,8 @@ SYSTEM_PROMPT = (
     "The tradeline generally shows up on their credit report 4-6 weeks after the report date "
     "(the report date is shown on the tradeline purchase page). "
     "Customers pay monthly to stay on the tradeline as long as they want, with a 3-month minimum. "
-    "When they are removed, the tradeline appears as a closed account on their credit report. "
+    "When they are removed, the tradeline simply appears as a closed account on their credit report. "
+    "Do NOT claim that payment history, account age, or other benefits remain after removal. "
     "We do NOT guarantee credit score increases.\n\n"
 
     "POLICIES:\n"
