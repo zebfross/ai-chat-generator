@@ -546,6 +546,8 @@ EMAIL_SYSTEM_PROMPT = (
 TW_BASE_URL = os.environ.get("TW_BASE_URL", "").rstrip("/")
 TW_BOT_API_KEY = os.environ.get("TW_BOT_API_KEY", "")
 TW_VERIFY_SSL = not any(h in TW_BASE_URL for h in ("localhost", ".local", "127.0.0.1"))
+CLICKUP_API_TOKEN = os.environ.get("CLICKUP_API_TOKEN", "")
+CLICKUP_LIST_ID = os.environ.get("CLICKUP_LIST_ID", "901708695881")
 
 TOOLS = [
     {
@@ -667,6 +669,34 @@ TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "create_task",
+        "description": (
+            "Create a task in the team's task management system (ClickUp). "
+            "Use this when a customer request needs follow-up by the team, "
+            "such as escalations, issues that can't be resolved in chat, "
+            "refund requests, or anything that requires manual action by staff."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "A brief title for the task.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Details about what needs to be done, including any relevant context from the conversation.",
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "Priority level: 1=urgent, 2=high, 3=normal, 4=low. Default to 3 if unsure.",
+                    "enum": [1, 2, 3, 4],
+                },
+            },
+            "required": ["title", "description"],
+        },
+    },
 ]
 
 
@@ -689,6 +719,8 @@ def _execute_tool(name: str, tool_input: dict, customer_email: str = None,
         return _tool_seller_payouts(tool_input, customer_email)
     if name == "transfer_to_agent":
         return _tool_transfer_to_agent()
+    if name == "create_task":
+        return _tool_create_task(tool_input, conversation_id, account_id)
     return f"Unknown tool: {name}"
 
 
@@ -897,6 +929,66 @@ def _tool_transfer_to_agent() -> str:
             "Do NOT use the transfer_to_agent tool again."
         )
     return "Conversation transferred to a live agent."
+
+
+def _tool_create_task(tool_input: dict, conversation_id: int = None,
+                      account_id: int = None) -> str:
+    """Create a ClickUp task and post a whisper in Chatwoot with the link."""
+    if not CLICKUP_API_TOKEN:
+        return "Error: ClickUp integration is not configured."
+
+    title = tool_input.get("title", "").strip()
+    description = tool_input.get("description", "").strip()
+    priority = tool_input.get("priority", 3)
+
+    if not title:
+        return "Error: task title is required."
+
+    full_description = description
+    if conversation_id and account_id:
+        full_description += (
+            f"\n\n---\nSource: Chatwoot conversation #{conversation_id}\n"
+            f"Conversation: {CHATWOOT_URL}/app/accounts/{account_id}/conversations/{conversation_id}"
+        )
+
+    try:
+        resp = http_requests.post(
+            f"https://api.clickup.com/api/v2/list/{CLICKUP_LIST_ID}/task",
+            json={"name": title, "description": full_description, "priority": priority},
+            headers={"Authorization": CLICKUP_API_TOKEN, "Content-Type": "application/json"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        task = resp.json()
+        task_url = task.get("url", "")
+    except Exception as e:
+        logging.exception("create_task error")
+        return f"Error creating task: {e}"
+
+    # Post whisper (private note) in Chatwoot with the task link
+    if conversation_id and account_id and task_url:
+        try:
+            whisper_url = (
+                f"{CHATWOOT_URL}/api/v1/accounts/{account_id}"
+                f"/conversations/{conversation_id}/messages"
+            )
+            http_requests.post(
+                whisper_url,
+                json={
+                    "content": f"\U0001f4cb **Task created:** [{title}]({task_url})\n\n_Priority: {priority}_",
+                    "message_type": "outgoing",
+                    "private": True,
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "api_access_token": CHATWOOT_USER_TOKEN,
+                },
+                timeout=10,
+            )
+        except Exception:
+            logging.exception("create_task whisper error")
+
+    return f"Task created: {title} — {task_url}"
 
 
 def _toggle_conversation_open(account_id: int, conversation_id: int):
@@ -1224,6 +1316,361 @@ def chatwoot_webhook():
     _current_trace = None
 
     return jsonify({"status": "ok"}), 200
+
+
+@MyApp.route("/taskbot/webhook", methods=["POST"])
+def taskbot_webhook():
+    """Handle incoming Chatwoot webhook events for the TaskBot.
+
+    Analyzes incoming messages and flags conversations that need action.
+    Adds 'action-required' label, sets priority, and posts a whisper.
+    Does NOT reply to the customer.
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "invalid payload"}), 400
+
+    event = data.get("event")
+    if event != "message_created":
+        return jsonify({"status": "ignored", "reason": "not message_created"}), 200
+
+    message_type = data.get("message_type")
+    if message_type != "incoming":
+        return jsonify({"status": "ignored", "reason": "not incoming"}), 200
+
+    if data.get("private"):
+        return jsonify({"status": "ignored", "reason": "private note"}), 200
+
+    content = (data.get("content") or "").strip()
+    if not content:
+        return jsonify({"status": "ignored", "reason": "empty message"}), 200
+
+    conversation = data.get("conversation") or {}
+    conversation_id = conversation.get("id")
+    account_id = data.get("account", {}).get("id")
+    inbox = data.get("inbox") or {}
+    inbox_name = inbox.get("name") or "Unknown"
+
+    sender = data.get("sender") or {}
+    sender_name = (sender.get("name") or "").strip()
+    sender_email = (sender.get("email") or "").strip()
+    sender_phone = (sender.get("phone_number") or "").strip()
+    sender_id = sender_email or sender_phone or sender_name
+
+    # Check exclusion list
+    excluded = os.environ.get("EXCLUDED_SENDERS", "[]")
+    try:
+        excluded_list = json.loads(excluded)
+    except Exception:
+        excluded_list = []
+    if any(exc.lower() in sender_id.lower() for exc in excluded_list if exc):
+        logging.info("[TASKBOT] Skipping excluded sender: %s", sender_id)
+        return jsonify({"status": "ignored", "reason": "excluded sender"}), 200
+
+    if not conversation_id or not account_id:
+        return jsonify({"error": "missing conversation_id or account_id"}), 400
+
+    # Get conversation context
+    try:
+        conversation_history = fetch_conversation_messages(account_id, conversation_id)
+        context_lines = []
+        for m in conversation_history[-10:]:
+            role = "Customer" if m["role"] == "user" else "Agent"
+            context_lines.append(f"{role}: {m['content']}")
+        context = "\n".join(context_lines)
+    except Exception:
+        context = ""
+
+    # Ask Claude to analyze
+    try:
+        analysis = _taskbot_analyze(content, context, sender_name or sender_id, inbox_name)
+    except Exception as e:
+        logging.exception("[TASKBOT] Analysis error")
+        return jsonify({"error": str(e)}), 500
+
+    if not analysis or not analysis.get("needs_action"):
+        logging.info("[TASKBOT] No action needed for message from %s", sender_id)
+        return jsonify({"status": "ok", "flagged": False}), 200
+
+    # Map priority number to Chatwoot priority string
+    priority_map = {1: "urgent", 2: "high", 3: "medium", 4: "low"}
+    priority = priority_map.get(analysis.get("priority", 3), "medium")
+
+    # Add 'action-required' label (preserving existing labels)
+    _taskbot_add_label(account_id, conversation_id, "action-required")
+
+    # Set conversation priority
+    _taskbot_set_priority(account_id, conversation_id, priority)
+
+    # Post whisper with summary
+    summary = analysis.get("summary", "")
+    whisper = f"**Action Required** ({priority}): {summary}"
+    send_chatwoot_private_message(account_id, conversation_id, whisper)
+
+    logging.info("[TASKBOT] Flagged conversation %s: %s (%s)", conversation_id, summary[:80], priority)
+    return jsonify({"status": "ok", "flagged": True, "priority": priority}), 200
+
+
+def _taskbot_add_label(account_id: int, conversation_id: int, label: str):
+    """Add a label to a conversation, preserving existing labels."""
+    try:
+        url = f"{CHATWOOT_URL}/api/v1/accounts/{account_id}/conversations/{conversation_id}/labels"
+        headers = {"Content-Type": "application/json", "api_access_token": CHATWOOT_USER_TOKEN}
+        resp = http_requests.get(url, headers=headers, timeout=10)
+        existing = resp.json().get("payload", []) if resp.ok else []
+        if label not in existing:
+            existing.append(label)
+            http_requests.post(url, json={"labels": existing}, headers=headers, timeout=10)
+    except Exception:
+        logging.exception("[TASKBOT] Error adding label")
+
+
+def _taskbot_set_priority(account_id: int, conversation_id: int, priority: str):
+    """Set priority on a conversation."""
+    try:
+        url = f"{CHATWOOT_URL}/api/v1/accounts/{account_id}/conversations/{conversation_id}"
+        headers = {"Content-Type": "application/json", "api_access_token": CHATWOOT_USER_TOKEN}
+        http_requests.patch(url, json={"priority": priority}, headers=headers, timeout=10)
+    except Exception:
+        logging.exception("[TASKBOT] Error setting priority")
+
+
+def _taskbot_analyze(message: str, context: str, sender_name: str, inbox_name: str) -> dict:
+    """Use Claude to decide if a conversation needs action."""
+    prompt = (
+        "You are a business assistant for TradelineWorks, a tradeline company. "
+        "You analyze incoming customer messages and decide if the conversation needs attention from the team.\n\n"
+        "Flag as action required when the message contains:\n"
+        "- A specific request or question that needs follow-up\n"
+        "- A complaint or escalation\n"
+        "- A time-sensitive matter\n"
+        "- An HR/admin request\n"
+        "- A request to purchase or sell tradelines\n\n"
+        "Do NOT flag:\n"
+        "- Simple greetings or 'thank you' messages\n"
+        "- Messages that are already being handled in the conversation\n"
+        "- Automated/system messages\n"
+        "- Spam or irrelevant messages\n\n"
+        f"Inbox: {inbox_name}\n"
+        f"Sender: {sender_name}\n\n"
+        f"Recent conversation context:\n{context}\n\n"
+        f"New message to analyze:\n{message}\n\n"
+        "Respond with JSON only:\n"
+        '{"needs_action": true/false, '
+        '"summary": "Brief description of what action is needed", '
+        '"priority": 1-4 (1=urgent, 2=high, 3=medium, 4=low)}'
+    )
+
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=300,
+    )
+
+    text = response.content[0].text
+    json_match = re.search(r'\{[^}]+\}', text, re.DOTALL)
+    if not json_match:
+        return None
+
+    return json.loads(json_match.group(0))
+
+
+EMAILBOT_SYSTEM_PROMPT = (
+    "You are a TradelineWorks.com customer support representative drafting an email response. "
+    "Write a complete, professional email reply that an agent can review and send.\n\n"
+    "Guidelines:\n"
+    "- Use a professional, friendly tone appropriate for email.\n"
+    "- Start with a greeting (e.g. \"Hi [Name],\") and end with a sign-off "
+    "(e.g. \"Best regards,\\nTradelineWorks Support\").\n"
+    "- Write in plain text — no markdown formatting, no bullet points with dashes.\n"
+    "- Provide thorough, helpful answers in paragraph form.\n"
+    "- Use your tools to look up real data (orders, tradelines, etc.) before responding.\n"
+    "- If you cannot help the customer, say so in the draft and suggest the agent handle it manually.\n"
+    "- Do NOT use the transfer_to_agent tool — this is a draft, not a live conversation.\n\n"
+
+    "HOW TRADELINES WORK:\n"
+    "A tradeline is being added as an authorized user on someone else's established credit card. "
+    "After purchase, the customer uploads their information and is added to the card within 1-3 days. "
+    "The tradeline generally shows up on their credit report 4-6 weeks after the report date "
+    "(the report date is shown on the tradeline purchase page). "
+    "Customers pay monthly to stay on the tradeline as long as they want, with a 3-month minimum. "
+    "When they are removed, the tradeline simply appears as a closed account on their credit report. "
+    "Do NOT claim that payment history, account age, or other benefits remain after removal. "
+    "We do NOT guarantee credit score increases.\n\n"
+
+    "POLICIES:\n"
+    "We do not allow CPNs — they are illegal. We only work with legitimate Social Security Numbers.\n\n"
+
+    "I'll give you previous chat requests we've received and how we responded for reference."
+)
+
+# Tools available to EmailBot — same as Riley but without transfer_to_agent
+EMAILBOT_TOOLS = [t for t in TOOLS if t["name"] != "transfer_to_agent"]
+
+
+@MyApp.route("/emailbot/webhook", methods=["POST"])
+def emailbot_webhook():
+    """Handle incoming Chatwoot webhook events for the EmailBot.
+
+    Drafts email responses and posts them as whispers for agent review.
+    Does NOT send anything to the customer.
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "invalid payload"}), 400
+
+    event = data.get("event")
+    if event != "message_created":
+        return jsonify({"status": "ignored", "reason": "not message_created"}), 200
+
+    message_type = data.get("message_type")
+    if message_type != "incoming":
+        return jsonify({"status": "ignored", "reason": "not incoming"}), 200
+
+    if data.get("private"):
+        return jsonify({"status": "ignored", "reason": "private note"}), 200
+
+    content = (data.get("content") or "").strip()
+    if not content:
+        return jsonify({"status": "ignored", "reason": "empty message"}), 200
+
+    conversation = data.get("conversation") or {}
+    conversation_id = conversation.get("id")
+    account_id = data.get("account", {}).get("id")
+    inbox = data.get("inbox") or {}
+    inbox_name = inbox.get("name") or "Unknown"
+
+    sender = data.get("sender") or {}
+    sender_name = (sender.get("name") or "").strip()
+    sender_email = (sender.get("email") or "").strip()
+    sender_phone = (sender.get("phone_number") or "").strip()
+    sender_id = sender_email or sender_phone or sender_name
+
+    # Check exclusion list (shared with TaskBot)
+    excluded = os.environ.get("EXCLUDED_SENDERS", "[]")
+    try:
+        excluded_list = json.loads(excluded)
+    except Exception:
+        excluded_list = []
+    if any(exc.lower() in sender_id.lower() for exc in excluded_list if exc):
+        logging.info("[EMAILBOT] Skipping excluded sender: %s", sender_id)
+        return jsonify({"status": "ignored", "reason": "excluded sender"}), 200
+
+    if not conversation_id or not account_id:
+        return jsonify({"error": "missing conversation_id or account_id"}), 400
+
+    # Skip if a human agent is assigned — let them handle it
+    assignee = conversation.get("assignee")
+    if assignee:
+        return jsonify({"status": "ignored", "reason": "assigned to agent"}), 200
+
+    logging.info("[EMAILBOT] Drafting response for %s in %s", sender_id, inbox_name)
+
+    # Fetch conversation history
+    conversation_history = fetch_conversation_messages(account_id, conversation_id)
+
+    # Build system prompt with Pinecone context and customer info
+    results = search_similar_chats(index, content)
+    context = "These are similar chat requests we have received in the past and how we responded to each:\n"
+    for result in results["matches"]:
+        context += "\nChat: " + result["metadata"]["chat_message"]
+        context += "\nResponse: " + result["metadata"]["response"]
+        context += "\n---\n"
+
+    system = EMAILBOT_SYSTEM_PROMPT + "\n\n"
+    if sender_name or sender_email:
+        system += "Current customer info:\n"
+        if sender_name:
+            system += f"- Name: {sender_name}\n"
+        if sender_email:
+            system += f"- Email: {sender_email}\n"
+        system += "\n"
+    system += context
+
+    # Build message list from conversation history
+    if conversation_history:
+        messages = list(conversation_history)
+        if not messages or messages[-1].get("content") != content:
+            messages.append({"role": "user", "content": content})
+        if messages and messages[0]["role"] != "user":
+            messages = messages[1:]
+    else:
+        messages = [{"role": "user", "content": content}]
+
+    # Generate draft using tools (same flow as Riley but with emailbot tools)
+    try:
+        draft, tools_used = _emailbot_run_with_tools(system, messages, customer_email=sender_email,
+                                                      account_id=account_id, conversation_id=conversation_id)
+    except Exception as e:
+        logging.exception("[EMAILBOT] Error generating draft")
+        return jsonify({"error": str(e)}), 500
+
+    if not draft:
+        return jsonify({"status": "ok", "drafted": False}), 200
+
+    # Build whisper with tool usage info
+    whisper = "**Draft Reply:**\n\n" + draft
+    if tools_used:
+        tool_lines = []
+        for t in tools_used:
+            tool_lines.append(f"- `{t['name']}({t['input']})` → {t['result'][:200]}")
+        whisper += "\n\n---\n**Tools used:**\n" + "\n".join(tool_lines)
+    send_chatwoot_private_message(account_id, conversation_id, whisper)
+    logging.info("[EMAILBOT] Posted draft for conversation %s", conversation_id)
+
+    return jsonify({"status": "ok", "drafted": True}), 200
+
+
+def _emailbot_run_with_tools(system: str, messages: list, max_rounds: int = 5,
+                              customer_email: str = None, account_id: int = None,
+                              conversation_id: int = None) -> tuple:
+    """Call Anthropic with EmailBot tools, looping until done.
+
+    Returns (draft_text, tools_used) where tools_used is a list of
+    {"name": ..., "input": ..., "result": ...} dicts.
+    """
+    tools_used = []
+    text_parts = []
+
+    for round_num in range(max_rounds):
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            system=system,
+            messages=messages,
+            tools=EMAILBOT_TOOLS,
+            max_tokens=1024,
+            temperature=0.7,
+        )
+
+        text_parts = [b.text for b in response.content if b.type == "text"]
+        tool_uses = [b for b in response.content if b.type == "tool_use"]
+
+        if not tool_uses:
+            return "\n".join(text_parts), tools_used
+
+        # Process tool calls
+        messages.append({"role": "assistant", "content": response.content})
+        tool_results = []
+        for tool_use in tool_uses:
+            result = _execute_tool(
+                tool_use.name, tool_use.input,
+                customer_email=customer_email,
+                account_id=account_id,
+                conversation_id=conversation_id,
+            )
+            tools_used.append({
+                "name": tool_use.name,
+                "input": json.dumps(tool_use.input),
+                "result": result,
+            })
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tool_use.id,
+                "content": result,
+            })
+        messages.append({"role": "user", "content": tool_results})
+
+    return ("\n".join(text_parts) if text_parts else None), tools_used
 
 
 @MyApp.route("/ocr", methods=["POST"])
