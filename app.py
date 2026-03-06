@@ -493,7 +493,15 @@ CHATWOOT_URL = os.environ.get("CHATWOOT_URL", "https://chat.inceptify.com")
 CHATWOOT_BOT_TOKEN = os.environ.get("CHATWOOT_BOT_TOKEN", "")
 CHATWOOT_USER_TOKEN = os.environ.get("CHATWOOT_USER_TOKEN", CHATWOOT_BOT_TOKEN)
 CHATWOOT_ACCOUNT_ID = int(os.environ.get("CHATWOOT_ACCOUNT_ID", "3"))
-EMAIL_INBOX_ID = int(os.environ.get("EMAIL_INBOX_ID", "0"))
+_email_ids_raw = os.environ.get("EMAIL_INBOX_IDS", os.environ.get("EMAIL_INBOX_ID", ""))
+EMAIL_INBOX_IDS = set()
+for _id in _email_ids_raw.split(","):
+    _id = _id.strip()
+    if _id:
+        try:
+            EMAIL_INBOX_IDS.add(int(_id))
+        except ValueError:
+            pass
 
 SYSTEM_PROMPT = (
     "You are a TradelineWorks.com support chat agent. "
@@ -1096,7 +1104,7 @@ def generate_bot_response(message, customer_name=None, customer_email=None,
         context += "\nResponse: " + result["metadata"]["response"]
         context += "\n---\n"
 
-    is_email = EMAIL_INBOX_ID and inbox_id == EMAIL_INBOX_ID
+    is_email = inbox_id in EMAIL_INBOX_IDS
     base_prompt = EMAIL_SYSTEM_PROMPT if is_email else SYSTEM_PROMPT
     system = base_prompt + "\n\n"
 
@@ -1226,106 +1234,19 @@ def generate_handoff_summary(conversation_history):
         return "Bot was unable to generate a summary of this conversation."
 
 
+def _is_sender_excluded(sender_id: str) -> bool:
+    """Check if a sender matches the exclusion list."""
+    excluded = os.environ.get("EXCLUDED_SENDERS", "[]")
+    try:
+        excluded_list = json.loads(excluded)
+    except Exception:
+        excluded_list = []
+    return any(exc.lower() in sender_id.lower() for exc in excluded_list if exc)
+
+
 @MyApp.route("/webhook", methods=["POST"])
 def chatwoot_webhook():
-    """Handle incoming Chatwoot webhook events."""
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"error": "invalid payload"}), 400
-
-    event = data.get("event")
-    if event != "message_created":
-        return jsonify({"status": "ignored", "reason": "not message_created"}), 200
-
-    message_type = data.get("message_type")
-    if message_type != "incoming":
-        return jsonify({"status": "ignored", "reason": "not incoming"}), 200
-
-    content = (data.get("content") or "").strip()
-    if not content:
-        return jsonify({"status": "ignored", "reason": "empty message"}), 200
-
-    conversation = data.get("conversation") or {}
-    conversation_id = conversation.get("id") or data.get("conversation", {}).get("id")
-    account_id = data.get("account", {}).get("id")
-    inbox_id = conversation.get("inbox_id")
-
-    # Skip if a human agent is assigned — let them handle it.
-    assignee = conversation.get("assignee")
-    if assignee:
-        return jsonify({"status": "ignored", "reason": "assigned to agent"}), 200
-
-    if not conversation_id or not account_id:
-        _log("webhook.missing_ids", conversation_id=conversation_id, account_id=account_id)
-        return jsonify({"error": "missing conversation_id or account_id"}), 400
-
-    # Extract customer name/email from the webhook sender data
-    sender = data.get("sender") or {}
-    customer_name = (sender.get("name") or "").strip() or None
-    customer_email = (sender.get("email") or "").strip() or None
-
-    # Start a trace for this request
-    global _current_trace
-    _current_trace = {
-        "ts": datetime.utcnow().isoformat(),
-        "conversation_id": conversation_id,
-        "account_id": account_id,
-        "inbox_id": inbox_id,
-        "message": content,
-        "sender": {k: sender.get(k) for k in ("id", "name", "email", "phone_number", "identifier")},
-        "customer_name": customer_name,
-        "customer_email": customer_email,
-        "assignee": assignee,
-        "events": [],
-    }
-
-    # Fetch prior messages so Claude sees the full conversation
-    conversation_history = fetch_conversation_messages(account_id, conversation_id)
-    _trace_event("history_fetched", message_count=len(conversation_history),
-                 messages=[{"role": m["role"], "content": m["content"][:200]} for m in conversation_history[-10:]])
-
-    try:
-        bot_reply, transfer_requested = generate_bot_response(
-            content, customer_name=customer_name, customer_email=customer_email,
-            conversation_history=conversation_history,
-            account_id=account_id, conversation_id=conversation_id,
-            inbox_id=inbox_id,
-        )
-        send_chatwoot_message(account_id, conversation_id, bot_reply)
-        _trace_event("reply_sent", reply=bot_reply[:500])
-
-        # Toggle status AFTER sending the farewell message (bot token can't
-        # post to "open" conversations)
-        if transfer_requested:
-            summary = generate_handoff_summary(conversation_history)
-            _toggle_conversation_open(account_id, conversation_id)
-            send_chatwoot_private_message(
-                account_id, conversation_id,
-                f"**Bot Summary:** {summary}"
-            )
-            _trace_event("handoff", summary=summary[:500])
-    except Exception as e:
-        logging.exception("webhook error")
-        _trace_event("error", error=str(e))
-        _current_trace["error"] = str(e)
-        TOOL_LOG.append(_current_trace)
-        _current_trace = None
-        return jsonify({"error": str(e)}), 500
-
-    TOOL_LOG.append(_current_trace)
-    _current_trace = None
-
-    return jsonify({"status": "ok"}), 200
-
-
-@MyApp.route("/taskbot/webhook", methods=["POST"])
-def taskbot_webhook():
-    """Handle incoming Chatwoot webhook events for the TaskBot.
-
-    Analyzes incoming messages and flags conversations that need action.
-    Adds 'action-required' label, sets priority, and posts a whisper.
-    Does NOT reply to the customer.
-    """
+    """Unified bot webhook — handles chat responses, email drafts, and task analysis."""
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "invalid payload"}), 400
@@ -1346,69 +1267,192 @@ def taskbot_webhook():
         return jsonify({"status": "ignored", "reason": "empty message"}), 200
 
     conversation = data.get("conversation") or {}
-    conversation_id = conversation.get("id")
+    conversation_id = conversation.get("id") or data.get("conversation", {}).get("id")
     account_id = data.get("account", {}).get("id")
+    inbox_id = conversation.get("inbox_id")
     inbox = data.get("inbox") or {}
     inbox_name = inbox.get("name") or "Unknown"
 
-    sender = data.get("sender") or {}
-    sender_name = (sender.get("name") or "").strip()
-    sender_email = (sender.get("email") or "").strip()
-    sender_phone = (sender.get("phone_number") or "").strip()
-    sender_id = sender_email or sender_phone or sender_name
-
-    # Check exclusion list
-    excluded = os.environ.get("EXCLUDED_SENDERS", "[]")
-    try:
-        excluded_list = json.loads(excluded)
-    except Exception:
-        excluded_list = []
-    if any(exc.lower() in sender_id.lower() for exc in excluded_list if exc):
-        logging.info("[TASKBOT] Skipping excluded sender: %s", sender_id)
-        return jsonify({"status": "ignored", "reason": "excluded sender"}), 200
+    # Skip if a human agent is assigned — let them handle it.
+    assignee = conversation.get("assignee")
+    if assignee:
+        return jsonify({"status": "ignored", "reason": "assigned to agent"}), 200
 
     if not conversation_id or not account_id:
+        _log("webhook.missing_ids", conversation_id=conversation_id, account_id=account_id)
         return jsonify({"error": "missing conversation_id or account_id"}), 400
 
-    # Get conversation context
-    try:
-        conversation_history = fetch_conversation_messages(account_id, conversation_id)
-        context_lines = []
-        for m in conversation_history[-10:]:
-            role = "Customer" if m["role"] == "user" else "Agent"
-            context_lines.append(f"{role}: {m['content']}")
-        context = "\n".join(context_lines)
-    except Exception:
-        context = ""
+    # Extract customer name/email from the webhook sender data
+    sender = data.get("sender") or {}
+    customer_name = (sender.get("name") or "").strip() or None
+    customer_email = (sender.get("email") or "").strip() or None
+    sender_phone = (sender.get("phone_number") or "").strip()
+    sender_id = customer_email or sender_phone or customer_name or ""
 
-    # Ask Claude to analyze
+    is_excluded = _is_sender_excluded(sender_id)
+    is_email = inbox_id in EMAIL_INBOX_IDS
+
+    # Start a trace for this request
+    global _current_trace
+    _current_trace = {
+        "ts": datetime.utcnow().isoformat(),
+        "conversation_id": conversation_id,
+        "account_id": account_id,
+        "inbox_id": inbox_id,
+        "inbox_name": inbox_name,
+        "is_email": is_email,
+        "message": content,
+        "sender": {k: sender.get(k) for k in ("id", "name", "email", "phone_number", "identifier")},
+        "customer_name": customer_name,
+        "customer_email": customer_email,
+        "is_excluded": is_excluded,
+        "events": [],
+    }
+
     try:
-        analysis = _taskbot_analyze(content, context, sender_name or sender_id, inbox_name)
+        if is_email:
+            _handle_email_message(content, conversation_id, account_id, inbox_id,
+                                  inbox_name, customer_name, customer_email, sender_id, is_excluded)
+        else:
+            _handle_chat_message(content, conversation_id, account_id, inbox_id,
+                                 inbox_name, customer_name, customer_email, sender_id, is_excluded)
     except Exception as e:
-        logging.exception("[TASKBOT] Analysis error")
+        logging.exception("webhook error")
+        _trace_event("error", error=str(e))
+        _current_trace["error"] = str(e)
+        TOOL_LOG.append(_current_trace)
+        _current_trace = None
         return jsonify({"error": str(e)}), 500
 
-    if not analysis or not analysis.get("needs_action"):
-        logging.info("[TASKBOT] No action needed for message from %s", sender_id)
-        return jsonify({"status": "ok", "flagged": False}), 200
+    TOOL_LOG.append(_current_trace)
+    _current_trace = None
 
-    # Map priority number to Chatwoot priority string
+    return jsonify({"status": "ok"}), 200
+
+
+def _handle_chat_message(content, conversation_id, account_id, inbox_id,
+                          inbox_name, customer_name, customer_email, sender_id, is_excluded):
+    """Handle chat/SMS messages: respond to customer + run task analysis."""
+    conversation_history = fetch_conversation_messages(account_id, conversation_id)
+    _trace_event("history_fetched", message_count=len(conversation_history),
+                 messages=[{"role": m["role"], "content": m["content"][:200]} for m in conversation_history[-10:]])
+
+    bot_reply, transfer_requested = generate_bot_response(
+        content, customer_name=customer_name, customer_email=customer_email,
+        conversation_history=conversation_history,
+        account_id=account_id, conversation_id=conversation_id,
+        inbox_id=inbox_id,
+    )
+    send_chatwoot_message(account_id, conversation_id, bot_reply)
+    _trace_event("reply_sent", reply=bot_reply[:500])
+
+    if transfer_requested:
+        summary = generate_handoff_summary(conversation_history)
+        _toggle_conversation_open(account_id, conversation_id)
+        send_chatwoot_private_message(
+            account_id, conversation_id,
+            f"**Bot Summary:** {summary}"
+        )
+        _trace_event("handoff", summary=summary[:500])
+
+    # Run TaskBot analysis (unless sender is excluded)
+    if not is_excluded:
+        _run_taskbot_analysis(content, conversation_id, account_id,
+                              customer_name, sender_id, inbox_name, conversation_history)
+
+
+def _handle_email_message(content, conversation_id, account_id, inbox_id,
+                           inbox_name, customer_name, customer_email, sender_id, is_excluded):
+    """Handle email messages: draft reply as whisper + run task analysis."""
+    if is_excluded:
+        logging.info("[RILEY] Skipping excluded sender for email: %s", sender_id)
+        return
+
+    logging.info("[RILEY] Processing email from %s in %s", sender_id, inbox_name)
+
+    conversation_history = fetch_conversation_messages(account_id, conversation_id)
+    _trace_event("history_fetched", message_count=len(conversation_history))
+
+    # Build EmailBot system prompt with Pinecone context
+    results = search_similar_chats(index, content)
+    context = "These are similar chat requests we have received in the past and how we responded to each:\n"
+    for result in results["matches"]:
+        context += "\nChat: " + result["metadata"]["chat_message"]
+        context += "\nResponse: " + result["metadata"]["response"]
+        context += "\n---\n"
+
+    system = EMAILBOT_SYSTEM_PROMPT + "\n\n"
+    if customer_name or customer_email:
+        system += "Current customer info:\n"
+        if customer_name:
+            system += f"- Name: {customer_name}\n"
+        if customer_email:
+            system += f"- Email: {customer_email}\n"
+        system += "\n"
+    system += context
+
+    # Build message list from conversation history
+    if conversation_history:
+        messages = list(conversation_history)
+        if not messages or messages[-1].get("content") != content:
+            messages.append({"role": "user", "content": content})
+        if messages and messages[0]["role"] != "user":
+            messages = messages[1:]
+    else:
+        messages = [{"role": "user", "content": content}]
+
+    # Generate draft with tools
+    draft, tools_used = _emailbot_run_with_tools(system, messages, customer_email=customer_email,
+                                                  account_id=account_id, conversation_id=conversation_id)
+
+    if draft:
+        whisper = "**Draft Reply:**\n\n" + draft
+        if tools_used:
+            tool_lines = []
+            for t in tools_used:
+                tool_lines.append(f"- `{t['name']}({t['input']})` → {t['result'][:200]}")
+            whisper += "\n\n---\n**Tools used:**\n" + "\n".join(tool_lines)
+        send_chatwoot_private_message(account_id, conversation_id, whisper)
+        _trace_event("email_draft_sent", draft=draft[:500])
+
+    # Run TaskBot analysis
+    _run_taskbot_analysis(content, conversation_id, account_id,
+                          customer_name, sender_id, inbox_name, conversation_history)
+
+
+def _run_taskbot_analysis(content, conversation_id, account_id,
+                           customer_name, sender_id, inbox_name, conversation_history=None):
+    """Run TaskBot analysis — add labels, priority, and whisper if action needed."""
+    if conversation_history is None:
+        conversation_history = fetch_conversation_messages(account_id, conversation_id)
+
+    context_lines = []
+    for m in conversation_history[-10:]:
+        role = "Customer" if m["role"] == "user" else "Agent"
+        context_lines.append(f"{role}: {m['content']}")
+    context = "\n".join(context_lines)
+
+    try:
+        analysis = _taskbot_analyze(content, context, customer_name or sender_id, inbox_name)
+    except Exception:
+        logging.exception("[RILEY] TaskBot analysis error")
+        return
+
+    if not analysis or not analysis.get("needs_action"):
+        return
+
     priority_map = {1: "urgent", 2: "high", 3: "medium", 4: "low"}
     priority = priority_map.get(analysis.get("priority", 3), "medium")
 
-    # Add 'action-required' label (preserving existing labels)
     _taskbot_add_label(account_id, conversation_id, "action-required")
-
-    # Set conversation priority
     _taskbot_set_priority(account_id, conversation_id, priority)
 
-    # Post whisper with summary
     summary = analysis.get("summary", "")
     whisper = f"**Action Required** ({priority}): {summary}"
     send_chatwoot_private_message(account_id, conversation_id, whisper)
+    _trace_event("taskbot_flagged", priority=priority, summary=summary[:200])
+    logging.info("[RILEY] Flagged conversation %s: %s (%s)", conversation_id, summary[:80], priority)
 
-    logging.info("[TASKBOT] Flagged conversation %s: %s (%s)", conversation_id, summary[:80], priority)
-    return jsonify({"status": "ok", "flagged": True, "priority": priority}), 200
 
 
 def _taskbot_add_label(account_id: int, conversation_id: int, label: str):
@@ -1507,118 +1551,6 @@ EMAILBOT_SYSTEM_PROMPT = (
 # Tools available to EmailBot — same as Riley but without transfer_to_agent
 EMAILBOT_TOOLS = [t for t in TOOLS if t["name"] != "transfer_to_agent"]
 
-
-@MyApp.route("/emailbot/webhook", methods=["POST"])
-def emailbot_webhook():
-    """Handle incoming Chatwoot webhook events for the EmailBot.
-
-    Drafts email responses and posts them as whispers for agent review.
-    Does NOT send anything to the customer.
-    """
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"error": "invalid payload"}), 400
-
-    event = data.get("event")
-    if event != "message_created":
-        return jsonify({"status": "ignored", "reason": "not message_created"}), 200
-
-    message_type = data.get("message_type")
-    if message_type != "incoming":
-        return jsonify({"status": "ignored", "reason": "not incoming"}), 200
-
-    if data.get("private"):
-        return jsonify({"status": "ignored", "reason": "private note"}), 200
-
-    content = (data.get("content") or "").strip()
-    if not content:
-        return jsonify({"status": "ignored", "reason": "empty message"}), 200
-
-    conversation = data.get("conversation") or {}
-    conversation_id = conversation.get("id")
-    account_id = data.get("account", {}).get("id")
-    inbox = data.get("inbox") or {}
-    inbox_name = inbox.get("name") or "Unknown"
-
-    sender = data.get("sender") or {}
-    sender_name = (sender.get("name") or "").strip()
-    sender_email = (sender.get("email") or "").strip()
-    sender_phone = (sender.get("phone_number") or "").strip()
-    sender_id = sender_email or sender_phone or sender_name
-
-    # Check exclusion list (shared with TaskBot)
-    excluded = os.environ.get("EXCLUDED_SENDERS", "[]")
-    try:
-        excluded_list = json.loads(excluded)
-    except Exception:
-        excluded_list = []
-    if any(exc.lower() in sender_id.lower() for exc in excluded_list if exc):
-        logging.info("[EMAILBOT] Skipping excluded sender: %s", sender_id)
-        return jsonify({"status": "ignored", "reason": "excluded sender"}), 200
-
-    if not conversation_id or not account_id:
-        return jsonify({"error": "missing conversation_id or account_id"}), 400
-
-    # Skip if a human agent is assigned — let them handle it
-    assignee = conversation.get("assignee")
-    if assignee:
-        return jsonify({"status": "ignored", "reason": "assigned to agent"}), 200
-
-    logging.info("[EMAILBOT] Drafting response for %s in %s", sender_id, inbox_name)
-
-    # Fetch conversation history
-    conversation_history = fetch_conversation_messages(account_id, conversation_id)
-
-    # Build system prompt with Pinecone context and customer info
-    results = search_similar_chats(index, content)
-    context = "These are similar chat requests we have received in the past and how we responded to each:\n"
-    for result in results["matches"]:
-        context += "\nChat: " + result["metadata"]["chat_message"]
-        context += "\nResponse: " + result["metadata"]["response"]
-        context += "\n---\n"
-
-    system = EMAILBOT_SYSTEM_PROMPT + "\n\n"
-    if sender_name or sender_email:
-        system += "Current customer info:\n"
-        if sender_name:
-            system += f"- Name: {sender_name}\n"
-        if sender_email:
-            system += f"- Email: {sender_email}\n"
-        system += "\n"
-    system += context
-
-    # Build message list from conversation history
-    if conversation_history:
-        messages = list(conversation_history)
-        if not messages or messages[-1].get("content") != content:
-            messages.append({"role": "user", "content": content})
-        if messages and messages[0]["role"] != "user":
-            messages = messages[1:]
-    else:
-        messages = [{"role": "user", "content": content}]
-
-    # Generate draft using tools (same flow as Riley but with emailbot tools)
-    try:
-        draft, tools_used = _emailbot_run_with_tools(system, messages, customer_email=sender_email,
-                                                      account_id=account_id, conversation_id=conversation_id)
-    except Exception as e:
-        logging.exception("[EMAILBOT] Error generating draft")
-        return jsonify({"error": str(e)}), 500
-
-    if not draft:
-        return jsonify({"status": "ok", "drafted": False}), 200
-
-    # Build whisper with tool usage info
-    whisper = "**Draft Reply:**\n\n" + draft
-    if tools_used:
-        tool_lines = []
-        for t in tools_used:
-            tool_lines.append(f"- `{t['name']}({t['input']})` → {t['result'][:200]}")
-        whisper += "\n\n---\n**Tools used:**\n" + "\n".join(tool_lines)
-    send_chatwoot_private_message(account_id, conversation_id, whisper)
-    logging.info("[EMAILBOT] Posted draft for conversation %s", conversation_id)
-
-    return jsonify({"status": "ok", "drafted": True}), 200
 
 
 def _emailbot_run_with_tools(system: str, messages: list, max_rounds: int = 5,
