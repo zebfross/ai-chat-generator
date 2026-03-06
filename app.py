@@ -503,6 +503,16 @@ for _id in _email_ids_raw.split(","):
         except ValueError:
             pass
 
+_sms_ids_raw = os.environ.get("SMS_INBOX_IDS", "")
+SMS_INBOX_IDS = set()
+for _id in _sms_ids_raw.split(","):
+    _id = _id.strip()
+    if _id:
+        try:
+            SMS_INBOX_IDS.add(int(_id))
+        except ValueError:
+            pass
+
 SYSTEM_PROMPT = (
     "You are a TradelineWorks.com support chat agent. "
     "This is a live chat — keep responses very short, casual, and conversational. "
@@ -1291,6 +1301,8 @@ def chatwoot_webhook():
 
     is_excluded = _is_sender_excluded(sender_id)
     is_email = inbox_id in EMAIL_INBOX_IDS
+    is_sms = inbox_id in SMS_INBOX_IDS
+    is_draft_only = is_email or is_sms
 
     # Start a trace for this request
     global _current_trace
@@ -1301,6 +1313,7 @@ def chatwoot_webhook():
         "inbox_id": inbox_id,
         "inbox_name": inbox_name,
         "is_email": is_email,
+        "is_sms": is_sms,
         "message": content,
         "sender": {k: sender.get(k) for k in ("id", "name", "email", "phone_number", "identifier")},
         "customer_name": customer_name,
@@ -1310,9 +1323,10 @@ def chatwoot_webhook():
     }
 
     try:
-        if is_email:
-            _handle_email_message(content, conversation_id, account_id, inbox_id,
-                                  inbox_name, customer_name, customer_email, sender_id, is_excluded)
+        if is_draft_only:
+            _handle_draft_message(content, conversation_id, account_id, inbox_id,
+                                  inbox_name, customer_name, customer_email, sender_id,
+                                  is_excluded, is_email=is_email)
         else:
             _handle_chat_message(content, conversation_id, account_id, inbox_id,
                                  inbox_name, customer_name, customer_email, sender_id, is_excluded)
@@ -1361,19 +1375,21 @@ def _handle_chat_message(content, conversation_id, account_id, inbox_id,
                               customer_name, sender_id, inbox_name, conversation_history)
 
 
-def _handle_email_message(content, conversation_id, account_id, inbox_id,
-                           inbox_name, customer_name, customer_email, sender_id, is_excluded):
-    """Handle email messages: draft reply as whisper + run task analysis."""
+def _handle_draft_message(content, conversation_id, account_id, inbox_id,
+                           inbox_name, customer_name, customer_email, sender_id,
+                           is_excluded, is_email=True):
+    """Handle draft-only inboxes (email/SMS): draft reply as whisper + run task analysis."""
     if is_excluded:
-        logging.info("[RILEY] Skipping excluded sender for email: %s", sender_id)
+        logging.info("[RILEY] Skipping excluded sender: %s", sender_id)
         return
 
-    logging.info("[RILEY] Processing email from %s in %s", sender_id, inbox_name)
+    channel_type = "email" if is_email else "SMS"
+    logging.info("[RILEY] Processing %s from %s in %s", channel_type, sender_id, inbox_name)
 
     conversation_history = fetch_conversation_messages(account_id, conversation_id)
     _trace_event("history_fetched", message_count=len(conversation_history))
 
-    # Build EmailBot system prompt with Pinecone context
+    # Build system prompt with Pinecone context
     results = search_similar_chats(index, content)
     context = "These are similar chat requests we have received in the past and how we responded to each:\n"
     for result in results["matches"]:
@@ -1381,7 +1397,8 @@ def _handle_email_message(content, conversation_id, account_id, inbox_id,
         context += "\nResponse: " + result["metadata"]["response"]
         context += "\n---\n"
 
-    system = EMAILBOT_SYSTEM_PROMPT + "\n\n"
+    base_prompt = EMAILBOT_SYSTEM_PROMPT if is_email else SMS_DRAFT_PROMPT
+    system = base_prompt + "\n\n"
     if customer_name or customer_email:
         system += "Current customer info:\n"
         if customer_name:
@@ -1548,7 +1565,28 @@ EMAILBOT_SYSTEM_PROMPT = (
     "I'll give you previous chat requests we've received and how we responded for reference."
 )
 
-# Tools available to EmailBot — same as Riley but without transfer_to_agent
+SMS_DRAFT_PROMPT = (
+    "You are a TradelineWorks.com support agent drafting an SMS reply for agent review. "
+    "Write a short, casual text message — 1-3 sentences max. "
+    "No greetings or sign-offs needed for texts. Keep it conversational.\n\n"
+
+    "HOW TRADELINES WORK:\n"
+    "A tradeline is being added as an authorized user on someone else's established credit card. "
+    "After purchase, the customer uploads their information and is added to the card within 1-3 days. "
+    "The tradeline generally shows up on their credit report 4-6 weeks after the report date. "
+    "Customers pay monthly with a 3-month minimum. "
+    "We do NOT guarantee credit score increases.\n\n"
+
+    "POLICIES:\n"
+    "We do not allow CPNs — they are illegal. We only work with legitimate Social Security Numbers.\n\n"
+
+    "Use your tools to look up real data before responding. "
+    "Do NOT use the transfer_to_agent tool — this is a draft, not a live conversation.\n\n"
+
+    "I'll give you previous chat requests we've received and how we responded for reference."
+)
+
+# Tools available to draft bots — same as Riley but without transfer_to_agent
 EMAILBOT_TOOLS = [t for t in TOOLS if t["name"] != "transfer_to_agent"]
 
 
