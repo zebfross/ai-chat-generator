@@ -566,6 +566,10 @@ TW_BOT_API_KEY = os.environ.get("TW_BOT_API_KEY", "")
 TW_VERIFY_SSL = not any(h in TW_BASE_URL for h in ("localhost", ".local", "127.0.0.1"))
 CLICKUP_API_TOKEN = os.environ.get("CLICKUP_API_TOKEN", "")
 CLICKUP_LIST_ID = os.environ.get("CLICKUP_LIST_ID", "901708695881")
+PIPEDRIVE_API_TOKEN = os.environ.get("PIPEDRIVE_API_TOKEN", "")
+PIPEDRIVE_STAGE_ID = int(os.environ.get("PIPEDRIVE_STAGE_ID", "0"))
+SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
+SENDGRID_LIST_ID = os.environ.get("SENDGRID_LIST_ID", "")
 
 TOOLS = [
     {
@@ -1262,6 +1266,11 @@ def chatwoot_webhook():
         return jsonify({"error": "invalid payload"}), 400
 
     event = data.get("event")
+
+    # Handle conversation resolved → push to Pipedrive/SendGrid
+    if event == "conversation_status_changed":
+        return _handle_conversation_status_changed(data)
+
     if event != "message_created":
         return jsonify({"status": "ignored", "reason": "not message_created"}), 200
 
@@ -1470,6 +1479,209 @@ def _run_taskbot_analysis(content, conversation_id, account_id,
     _trace_event("taskbot_flagged", priority=priority, summary=summary[:200])
     logging.info("[RILEY] Flagged conversation %s: %s (%s)", conversation_id, summary[:80], priority)
 
+
+
+# ---------------------------------------------------------------------------
+# CRM Integration — Pipedrive + SendGrid on conversation resolved
+# ---------------------------------------------------------------------------
+
+def _handle_conversation_status_changed(data):
+    """When a conversation is resolved, push contact + transcript to Pipedrive and SendGrid."""
+    conversation = data.get("conversation") or data
+    status = (conversation.get("status") or "").lower()
+
+    if status != "resolved":
+        return jsonify({"status": "ignored", "reason": f"status is {status}, not resolved"}), 200
+
+    conversation_id = conversation.get("id")
+    account_id = data.get("account", {}).get("id")
+    inbox_id = conversation.get("inbox_id")
+
+    if not conversation_id or not account_id:
+        return jsonify({"error": "missing conversation_id or account_id"}), 400
+
+    # Get contact info from the conversation meta
+    meta = conversation.get("meta") or {}
+    sender = meta.get("sender") or data.get("sender") or {}
+    name = (sender.get("name") or "").strip()
+    email = (sender.get("email") or "").strip()
+    phone = (sender.get("phone_number") or "").strip()
+
+    # Skip if no contact info
+    if not email and not phone:
+        logging.info("[CRM] No email or phone for conversation %s, skipping", conversation_id)
+        return jsonify({"status": "ignored", "reason": "no contact info"}), 200
+
+    # Skip excluded senders
+    sender_id = email or phone or name
+    if _is_sender_excluded(sender_id):
+        logging.info("[CRM] Skipping excluded sender: %s", sender_id)
+        return jsonify({"status": "ignored", "reason": "excluded sender"}), 200
+
+    # Skip internal chat inbox
+    inbox = data.get("inbox") or {}
+    channel_type = inbox.get("channel_type") or ""
+    if "Internal" in channel_type:
+        return jsonify({"status": "ignored", "reason": "internal channel"}), 200
+
+    logging.info("[CRM] Conversation %s resolved — syncing %s to CRM", conversation_id, sender_id)
+
+    # Fetch transcript
+    transcript = _build_transcript(account_id, conversation_id)
+
+    # Push to Pipedrive
+    if PIPEDRIVE_API_TOKEN and PIPEDRIVE_STAGE_ID:
+        try:
+            _pipedrive_sync(name, email, phone, transcript, conversation_id, account_id)
+        except Exception:
+            logging.exception("[CRM] Pipedrive sync error")
+
+    # Push to SendGrid
+    if SENDGRID_API_KEY and SENDGRID_LIST_ID:
+        try:
+            _sendgrid_sync(email, name, phone)
+        except Exception:
+            logging.exception("[CRM] SendGrid sync error")
+
+    return jsonify({"status": "ok", "synced": True}), 200
+
+
+def _build_transcript(account_id, conversation_id):
+    """Build an HTML transcript from a Chatwoot conversation."""
+    messages = fetch_conversation_messages(account_id, conversation_id)
+    if not messages:
+        return "No messages in conversation."
+
+    lines = []
+    for m in messages:
+        who = "Customer" if m["role"] == "user" else "Agent"
+        content = m["content"].replace("\n", "<br />")
+        lines.append(f"<strong>{who}</strong>: {content}")
+    return "<br />\n".join(lines)
+
+
+def _pipedrive_sync(name, email, phone, transcript, conversation_id, account_id):
+    """Find/create person in Pipedrive, create deal with transcript."""
+    base = "https://api.pipedrive.com/v1"
+    params = {"api_token": PIPEDRIVE_API_TOKEN}
+
+    # 1. Search for existing person by email or phone
+    person_id = None
+    if email:
+        resp = http_requests.get(f"{base}/persons/search",
+                                  params={**params, "term": email, "fields": "email", "exact_match": "true"},
+                                  timeout=15)
+        if resp.ok:
+            items = resp.json().get("data", {}).get("items", [])
+            if items:
+                person_id = items[0]["item"]["id"]
+
+    if not person_id and phone:
+        resp = http_requests.get(f"{base}/persons/search",
+                                  params={**params, "term": phone},
+                                  timeout=15)
+        if resp.ok:
+            items = resp.json().get("data", {}).get("items", [])
+            if items:
+                person_id = items[0]["item"]["id"]
+
+    # 2. Create person if not found
+    if not person_id:
+        person_data = {"name": name or email or phone}
+        if email:
+            person_data["email"] = [{"value": email, "primary": True}]
+        if phone:
+            person_data["phone"] = [{"value": phone, "primary": True}]
+        resp = http_requests.post(f"{base}/persons", params=params, json=person_data, timeout=15)
+        if resp.ok and resp.json().get("success"):
+            person_id = resp.json()["data"]["id"]
+            logging.info("[CRM] Created Pipedrive person %s for %s", person_id, email or phone)
+        else:
+            logging.error("[CRM] Failed to create Pipedrive person: %s", resp.text[:300])
+            return
+
+    # 3. Check if deal already exists for this person in the target pipeline
+    resp = http_requests.get(f"{base}/persons/{person_id}/deals", params=params, timeout=15)
+    if resp.ok:
+        # Get pipeline ID for our stage
+        stage_resp = http_requests.get(f"{base}/stages/{PIPEDRIVE_STAGE_ID}", params=params, timeout=15)
+        pipeline_id = None
+        if stage_resp.ok and stage_resp.json().get("success"):
+            pipeline_id = stage_resp.json()["data"]["pipeline_id"]
+
+        existing_deals = resp.json().get("data") or []
+        for deal in existing_deals:
+            if pipeline_id and deal.get("pipeline_id") == pipeline_id:
+                # Deal already exists — just add the transcript as a note
+                deal_id = deal["id"]
+                logging.info("[CRM] Deal %s already exists for person %s, adding note", deal_id, person_id)
+                _pipedrive_add_note(deal_id, transcript, conversation_id, account_id)
+                return
+
+    # 4. Create deal
+    deal_title = name or email or phone or "Chatwoot conversation"
+    deal_data = {
+        "title": deal_title,
+        "stage_id": PIPEDRIVE_STAGE_ID,
+        "person_id": person_id,
+    }
+    resp = http_requests.post(f"{base}/deals", params=params, json=deal_data, timeout=15)
+    if resp.ok and resp.json().get("success"):
+        deal_id = resp.json()["data"]["id"]
+        logging.info("[CRM] Created Pipedrive deal %s for %s", deal_id, email or phone)
+        _pipedrive_add_note(deal_id, transcript, conversation_id, account_id)
+    else:
+        logging.error("[CRM] Failed to create Pipedrive deal: %s", resp.text[:300])
+
+
+def _pipedrive_add_note(deal_id, transcript, conversation_id, account_id):
+    """Add a note with the chat transcript to a Pipedrive deal."""
+    base = "https://api.pipedrive.com/v1"
+    params = {"api_token": PIPEDRIVE_API_TOKEN}
+
+    note_content = transcript
+    if conversation_id and account_id:
+        chatwoot_link = f"{CHATWOOT_URL}/app/accounts/{account_id}/conversations/{conversation_id}"
+        note_content = f'<a href="{chatwoot_link}">View in Chatwoot</a><br /><br />{transcript}'
+
+    resp = http_requests.post(f"{base}/notes", params=params,
+                               json={"deal_id": deal_id, "content": note_content},
+                               timeout=15)
+    if resp.ok:
+        logging.info("[CRM] Added transcript note to deal %s", deal_id)
+    else:
+        logging.error("[CRM] Failed to add note to deal %s: %s", deal_id, resp.text[:300])
+
+
+def _sendgrid_sync(email, name, phone):
+    """Add contact to a SendGrid list."""
+    if not email:
+        return
+
+    fname, lname = "", ""
+    if name:
+        parts = name.split(None, 1)
+        fname = parts[0]
+        lname = parts[1] if len(parts) > 1 else ""
+
+    contact = {"email": email}
+    if fname:
+        contact["first_name"] = fname
+    if lname:
+        contact["last_name"] = lname
+    if phone:
+        contact["phone_number"] = phone
+
+    resp = http_requests.put(
+        "https://api.sendgrid.com/v3/marketing/contacts",
+        json={"list_ids": [SENDGRID_LIST_ID], "contacts": [contact]},
+        headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
+        timeout=15,
+    )
+    if resp.ok:
+        logging.info("[CRM] Added %s to SendGrid list %s", email, SENDGRID_LIST_ID)
+    else:
+        logging.error("[CRM] SendGrid error: %s", resp.text[:300])
 
 
 def _taskbot_add_label(account_id: int, conversation_id: int, label: str):
