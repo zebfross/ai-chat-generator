@@ -2078,6 +2078,19 @@ def review_system_prompt():
     return jsonify({"system_prompt": prompt, "channel": channel})
 
 
+@MyApp.route("/review/conversation-history")
+def review_conversation_history():
+    if not _check_review_key():
+        return jsonify({"error": "unauthorized"}), 401
+
+    conversation_id = request.args.get("conversation_id", type=int)
+    if not conversation_id:
+        return jsonify({"error": "conversation_id required"}), 400
+
+    messages = fetch_conversation_messages(CHATWOOT_ACCOUNT_ID, conversation_id)
+    return jsonify({"messages": messages})
+
+
 @MyApp.route("/review/correct", methods=["POST"])
 def review_correct():
     if not _check_review_key():
