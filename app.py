@@ -536,7 +536,10 @@ SYSTEM_PROMPT = (
 
     "TOOLS:\n"
     "You have tools to search tradelines, look up orders, reset passwords, "
-    "cancel orders, and check seller payouts. Use these tools before transferring to a human agent.\n\n"
+    "cancel orders, check seller payouts, and search the company knowledgebase. "
+    "Use the search_knowledge tool when a customer asks about processes, policies, "
+    "or anything you're not confident answering from the info above. "
+    "Use these tools before transferring to a human agent.\n\n"
     "If you cannot help the customer after using the available tools, or they explicitly ask for a human agent, "
     "use the transfer_to_agent tool to hand the conversation to a live agent.\n\n"
 
@@ -557,7 +560,9 @@ EMAIL_SYSTEM_PROMPT = (
     "- If you cannot help the customer, or they explicitly ask for a human agent, "
     "use the transfer_to_agent tool to hand the conversation to a live agent.\n"
     "- When a customer asks for a phone call, do not offer to call them directly. "
-    "Instead, offer to schedule a call with a team member and ask for their preferred date/time and phone number.\n\n"
+    "Instead, offer to schedule a call with a team member and ask for their preferred date/time and phone number.\n"
+    "- Use your tools (search tradelines, look up orders, search knowledgebase, etc.) "
+    "to find accurate information before responding.\n\n"
     "I'll give you previous chat requests we've received and how we responded for reference."
 )
 
@@ -723,11 +728,54 @@ TOOLS = [
             "required": ["title", "description"],
         },
     },
+    {
+        "name": "search_knowledge",
+        "description": (
+            "Read a knowledgebase article by its ID. The list of available "
+            "articles and their IDs is in your system prompt. Use this when "
+            "a customer asks about processes, policies, or anything you're "
+            "not confident answering from your instructions alone."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "article_id": {
+                    "type": "number",
+                    "description": "The ID of the knowledgebase article to read.",
+                },
+            },
+            "required": ["article_id"],
+        },
+    },
 ]
 
 
 def _tw_headers():
     return {"X-Bot-Api-Key": TW_BOT_API_KEY}
+
+
+def _fetch_knowledge_titles() -> str:
+    """Fetch knowledgebase article titles at startup for system prompt context."""
+    try:
+        resp = requests.get(
+            f"{TW_BASE_URL}/wp-json/tw/v1/bot/knowledge",
+            headers=_tw_headers(),
+            verify=TW_VERIFY_SSL,
+            timeout=10,
+        )
+        if resp.ok:
+            articles = resp.json()
+            if articles:
+                lines = ["KNOWLEDGEBASE ARTICLES (use search_knowledge tool with the article ID to read):"]
+                for a in articles:
+                    lines.append(f"  - [ID {a['id']}] {a['title']}")
+                return "\n".join(lines)
+    except Exception:
+        pass
+    return ""
+
+
+_KNOWLEDGE_TITLES = _fetch_knowledge_titles() if TW_BASE_URL else ""
 
 
 def _lookup_user_role(email: str = None, phone: str = None) -> str | None:
@@ -770,7 +818,30 @@ def _execute_tool(name: str, tool_input: dict, customer_email: str = None,
         return _tool_transfer_to_agent()
     if name == "create_task":
         return _tool_create_task(tool_input, conversation_id, account_id)
+    if name == "search_knowledge":
+        return _tool_search_knowledge(tool_input)
     return f"Unknown tool: {name}"
+
+
+def _tool_search_knowledge(tool_input: dict) -> str:
+    """Fetch a knowledgebase article by ID from the TradelineWorks API."""
+    article_id = tool_input.get("article_id")
+    if not article_id:
+        return "article_id is required. Check the article list in your system prompt."
+    try:
+        resp = requests.get(
+            f"{TW_BASE_URL}/wp-json/tw/v1/bot/knowledge",
+            params={"id": int(article_id)},
+            headers=_tw_headers(),
+            verify=TW_VERIFY_SSL,
+            timeout=10,
+        )
+        if not resp.ok:
+            return f"Knowledge base lookup failed (HTTP {resp.status_code})."
+        data = resp.json()
+        return f"**{data.get('title', '')}**\n\n{data.get('content', '')}"
+    except Exception as exc:
+        return f"Knowledge base lookup error: {exc}"
 
 
 def _tool_search_tradelines(tool_input: dict) -> str:
@@ -1148,6 +1219,9 @@ def generate_bot_response(message, customer_name=None, customer_email=None,
     is_email = inbox_id in EMAIL_INBOX_IDS
     base_prompt = EMAIL_SYSTEM_PROMPT if is_email else SYSTEM_PROMPT
     system = base_prompt + "\n\n"
+
+    if _KNOWLEDGE_TITLES:
+        system += _KNOWLEDGE_TITLES + "\n\n"
 
     # Include customer info so Claude can greet them by name
     if customer_name or customer_email or sender_phone:
