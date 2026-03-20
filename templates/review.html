@@ -68,13 +68,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 
 <script>
 const KEY = "{{ review_key }}";
-const BASE = window.location.origin;
+// Derive base from the current page URL (e.g. /bot/review -> /bot)
+const BASE = window.location.pathname.replace(/\/review\/?$/, "");
 let messages = [];
 let currentIdx = 0;
 
 async function api(path, opts) {
   const sep = path.includes("?") ? "&" : "?";
-  const resp = await fetch(BASE + path + sep + "key=" + KEY, opts);
+  const url = BASE + path + sep + "key=" + KEY;
+  const resp = await fetch(url, opts);
   return resp.json();
 }
 
