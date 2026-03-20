@@ -730,6 +730,29 @@ def _tw_headers():
     return {"X-Bot-Api-Key": TW_BOT_API_KEY}
 
 
+def _lookup_user_role(email: str = None, phone: str = None) -> str | None:
+    """Look up whether a customer is a buyer or seller via the WP endpoint."""
+    if not email and not phone:
+        return None
+    params = {}
+    if email:
+        params["email"] = email
+    if phone:
+        params["phone"] = phone
+    try:
+        resp = requests.get(
+            f"{TW_BASE_URL}/wp-json/tw/v1/bot/user-role",
+            params=params,
+            headers=_tw_headers(),
+            timeout=5,
+        )
+        if resp.ok:
+            return resp.json().get("role")
+    except Exception:
+        pass
+    return None
+
+
 def _execute_tool(name: str, tool_input: dict, customer_email: str = None,
                    account_id: int = None, conversation_id: int = None) -> str:
     """Dispatch a tool call and return a plain-text result string."""
@@ -1127,12 +1150,15 @@ def generate_bot_response(message, customer_name=None, customer_email=None,
     system = base_prompt + "\n\n"
 
     # Include customer info so Claude can greet them by name
-    if customer_name or customer_email:
+    if customer_name or customer_email or sender_phone:
         system += "Current customer info:\n"
         if customer_name:
             system += f"- Name: {customer_name}\n"
         if customer_email:
             system += f"- Email: {customer_email}\n"
+        role = _lookup_user_role(customer_email, sender_phone)
+        if role:
+            system += f"- Role: {role.capitalize()}\n"
         system += "\n"
 
     system += context
@@ -1338,11 +1364,12 @@ def chatwoot_webhook():
     try:
         if is_draft_only:
             _handle_draft_message(content, conversation_id, account_id, inbox_id,
-                                  inbox_name, customer_name, customer_email, sender_id,
-                                  is_excluded, is_email=is_email)
+                                  inbox_name, customer_name, customer_email, sender_phone,
+                                  sender_id, is_excluded, is_email=is_email)
         else:
             _handle_chat_message(content, conversation_id, account_id, inbox_id,
-                                 inbox_name, customer_name, customer_email, sender_id, is_excluded)
+                                 inbox_name, customer_name, customer_email, sender_phone,
+                                 sender_id, is_excluded)
     except Exception as e:
         logging.exception("webhook error")
         _trace_event("error", error=str(e))
@@ -1358,7 +1385,8 @@ def chatwoot_webhook():
 
 
 def _handle_chat_message(content, conversation_id, account_id, inbox_id,
-                          inbox_name, customer_name, customer_email, sender_id, is_excluded):
+                          inbox_name, customer_name, customer_email, sender_phone,
+                          sender_id, is_excluded):
     """Handle chat/SMS messages: respond to customer + run task analysis."""
     conversation_history = fetch_conversation_messages(account_id, conversation_id)
     _trace_event("history_fetched", message_count=len(conversation_history),
@@ -1373,6 +1401,9 @@ def _handle_chat_message(content, conversation_id, account_id, inbox_id,
     send_chatwoot_message(account_id, conversation_id, bot_reply)
     _trace_event("reply_sent", reply=bot_reply[:500])
 
+    # Bot handled the message — clear action-required
+    _taskbot_remove_label(account_id, conversation_id, "action-required")
+
     if transfer_requested:
         summary = generate_handoff_summary(conversation_history)
         _toggle_conversation_open(account_id, conversation_id)
@@ -1380,6 +1411,8 @@ def _handle_chat_message(content, conversation_id, account_id, inbox_id,
             account_id, conversation_id,
             f"**Bot Summary:** {summary}"
         )
+        # Handoff means a human still needs to act
+        _taskbot_add_label(account_id, conversation_id, "action-required")
         _trace_event("handoff", summary=summary[:500])
 
     # Run TaskBot analysis (unless sender is excluded)
@@ -1389,8 +1422,8 @@ def _handle_chat_message(content, conversation_id, account_id, inbox_id,
 
 
 def _handle_draft_message(content, conversation_id, account_id, inbox_id,
-                           inbox_name, customer_name, customer_email, sender_id,
-                           is_excluded, is_email=True):
+                           inbox_name, customer_name, customer_email, sender_phone,
+                           sender_id, is_excluded, is_email=True):
     """Handle draft-only inboxes (email/SMS): draft reply as whisper + run task analysis."""
     if is_excluded:
         logging.info("[RILEY] Skipping excluded sender: %s", sender_id)
@@ -1412,12 +1445,15 @@ def _handle_draft_message(content, conversation_id, account_id, inbox_id,
 
     base_prompt = EMAILBOT_SYSTEM_PROMPT if is_email else SMS_DRAFT_PROMPT
     system = base_prompt + "\n\n"
-    if customer_name or customer_email:
+    if customer_name or customer_email or sender_phone:
         system += "Current customer info:\n"
         if customer_name:
             system += f"- Name: {customer_name}\n"
         if customer_email:
             system += f"- Email: {customer_email}\n"
+        role = _lookup_user_role(customer_email, sender_phone)
+        if role:
+            system += f"- Role: {role.capitalize()}\n"
         system += "\n"
     system += context
 
@@ -1444,6 +1480,8 @@ def _handle_draft_message(content, conversation_id, account_id, inbox_id,
             whisper += "\n\n---\n**Tools used:**\n" + "\n".join(tool_lines)
         send_chatwoot_private_message(account_id, conversation_id, whisper)
         _trace_event("email_draft_sent", draft=draft[:500])
+        # Draft generated — clear action-required until next incoming message
+        _taskbot_remove_label(account_id, conversation_id, "action-required")
 
     # Run TaskBot analysis
     _run_taskbot_analysis(content, conversation_id, account_id,
@@ -1700,6 +1738,20 @@ def _taskbot_add_label(account_id: int, conversation_id: int, label: str):
             http_requests.post(url, json={"labels": existing}, headers=headers, timeout=10)
     except Exception:
         logging.exception("[TASKBOT] Error adding label")
+
+
+def _taskbot_remove_label(account_id: int, conversation_id: int, label: str):
+    """Remove a label from a conversation if present."""
+    try:
+        url = f"{CHATWOOT_URL}/api/v1/accounts/{account_id}/conversations/{conversation_id}/labels"
+        headers = {"Content-Type": "application/json", "api_access_token": CHATWOOT_USER_TOKEN}
+        resp = http_requests.get(url, headers=headers, timeout=10)
+        existing = resp.json().get("payload", []) if resp.ok else []
+        if label in existing:
+            existing.remove(label)
+            http_requests.post(url, json={"labels": existing}, headers=headers, timeout=10)
+    except Exception:
+        logging.exception("[TASKBOT] Error removing label")
 
 
 def _taskbot_set_priority(account_id: int, conversation_id: int, priority: str):
