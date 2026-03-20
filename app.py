@@ -2019,6 +2019,7 @@ def review_messages():
                 "conversation_id": conv_id,
                 "message_id": msg.get("id"),
                 "created_at": created,
+                "inbox_id": conv.get("inbox_id"),
                 "inbox_name": inbox_name,
                 "is_private": is_private,
                 "conversation_url": f"{CHATWOOT_URL}/app/accounts/{account_id}/conversations/{conv_id}",
@@ -2049,6 +2050,32 @@ def review_context():
         })
 
     return jsonify({"context": items})
+
+
+@MyApp.route("/review/system-prompt")
+def review_system_prompt():
+    if not _check_review_key():
+        return jsonify({"error": "unauthorized"}), 401
+
+    inbox_id = request.args.get("inbox_id", type=int)
+    is_email = inbox_id in EMAIL_INBOX_IDS if inbox_id else False
+    is_sms = inbox_id in SMS_INBOX_IDS if inbox_id else False
+    is_draft = is_email or is_sms
+
+    if is_email:
+        prompt = EMAILBOT_SYSTEM_PROMPT
+        channel = "email"
+    elif is_sms:
+        prompt = SMS_DRAFT_PROMPT
+        channel = "sms"
+    elif is_draft:
+        prompt = EMAILBOT_SYSTEM_PROMPT
+        channel = "draft"
+    else:
+        prompt = SYSTEM_PROMPT
+        channel = "chat"
+
+    return jsonify({"system_prompt": prompt, "channel": channel})
 
 
 @MyApp.route("/review/correct", methods=["POST"])
