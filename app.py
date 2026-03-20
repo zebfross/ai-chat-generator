@@ -1893,6 +1893,21 @@ def ocr_image():
 
 REVIEW_KEY = os.environ.get("REVIEW_KEY", "")
 
+import sqlite3
+
+_REVIEW_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "review.db")
+
+
+def _review_db():
+    """Get a SQLite connection (creates table on first call)."""
+    conn = sqlite3.connect(_REVIEW_DB_PATH)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS reviewed_messages "
+        "(message_id INTEGER PRIMARY KEY, reviewed_at TEXT)"
+    )
+    return conn
+
+
 # iPhone tapback reactions: Liked "...", Loved "...", etc.
 _TAPBACK_RE = re.compile(
     r'^(Liked|Loved|Disliked|Laughed at|Emphasized|Questioned)\s+"', re.IGNORECASE
@@ -2050,6 +2065,37 @@ def review_correct():
 
     store_chat(index, question, answer, datetime.utcnow().isoformat())
     return jsonify({"status": "saved"})
+
+
+@MyApp.route("/review/reviewed")
+def review_reviewed():
+    if not _check_review_key():
+        return jsonify({"error": "unauthorized"}), 401
+
+    conn = _review_db()
+    rows = conn.execute("SELECT message_id FROM reviewed_messages").fetchall()
+    conn.close()
+    return jsonify({"reviewed": [r[0] for r in rows]})
+
+
+@MyApp.route("/review/mark-reviewed", methods=["POST"])
+def review_mark_reviewed():
+    if not _check_review_key():
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    message_id = data.get("message_id")
+    if not message_id:
+        return jsonify({"error": "message_id required"}), 400
+
+    conn = _review_db()
+    conn.execute(
+        "INSERT OR IGNORE INTO reviewed_messages (message_id, reviewed_at) VALUES (?, ?)",
+        (message_id, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
 
 
 # ── Catch-all (must be last) ───────────────────────────────────────────

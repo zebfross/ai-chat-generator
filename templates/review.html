@@ -15,7 +15,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .controls button:hover { background: #eee; }
 .counter { font-size: 0.9em; color: #666; }
 .card { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); padding: 24px; max-width: 800px; margin: 0 auto 20px; }
-.card-meta { font-size: 0.8em; color: #888; margin-bottom: 12px; display: flex; gap: 16px; flex-wrap: wrap; }
+.card.reviewed { opacity: 0.6; }
+.card-meta { font-size: 0.8em; color: #888; margin-bottom: 12px; display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
 .card-meta a { color: #2563eb; text-decoration: none; }
 .card-meta a:hover { text-decoration: underline; }
 .label { font-weight: 600; font-size: 0.85em; color: #555; margin-bottom: 4px; }
@@ -42,6 +43,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .loading { text-align: center; padding: 40px; color: #888; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75em; background: #e5e7eb; }
 .badge.private { background: #fef3c7; color: #92400e; }
+.badge.reviewed-badge { background: #d1fae5; color: #065f46; }
 </style>
 </head>
 <body>
@@ -51,6 +53,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
   <div class="controls">
     <label>After: <input type="date" id="dateFilter"></label>
     <button onclick="loadMessages()">Filter</button>
+    <label><input type="checkbox" id="hideReviewed"> Hide reviewed</label>
     <span class="counter" id="counter"></span>
   </div>
 </div>
@@ -70,7 +73,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 const KEY = "{{ review_key }}";
 // Derive base from the current page URL (e.g. /bot/review -> /bot)
 const BASE = window.location.pathname.replace(/\/review\/?$/, "");
-let messages = [];
+let allMessages = [];
+let messages = [];  // filtered view
+let reviewedSet = new Set();
 let currentIdx = 0;
 
 async function api(path, opts) {
@@ -80,29 +85,48 @@ async function api(path, opts) {
   return resp.json();
 }
 
+function applyFilter() {
+  const hide = document.getElementById("hideReviewed").checked;
+  messages = hide ? allMessages.filter(m => !reviewedSet.has(m.message_id)) : allMessages;
+}
+
 async function loadMessages() {
   const after = document.getElementById("dateFilter").value;
   const container = document.getElementById("cardContainer");
   container.innerHTML = '<div class="loading">Loading messages...</div>';
+  allMessages = [];
   messages = [];
   currentIdx = 0;
 
+  // Load reviewed IDs and messages in parallel
+  const reviewedPromise = api("/review/reviewed");
+
+  let fetched = [];
   let page = 1;
-  // Load up to 5 pages
   while (page <= 5) {
     let url = "/review/messages?page=" + page;
     if (after) url += "&after=" + after + "T00:00:00";
     const data = await api(url);
     if (!data.messages || data.messages.length === 0) break;
-    messages = messages.concat(data.messages);
+    fetched = fetched.concat(data.messages);
     page++;
   }
+
+  const reviewedData = await reviewedPromise;
+  reviewedSet = new Set(reviewedData.reviewed || []);
+
+  allMessages = fetched;
+  applyFilter();
 
   if (messages.length === 0) {
     container.innerHTML = '<div class="loading">No bot messages found.</div>';
     updateNav();
     return;
   }
+
+  // Jump to first unreviewed message
+  const firstUnreviewed = messages.findIndex(m => !reviewedSet.has(m.message_id));
+  currentIdx = firstUnreviewed >= 0 ? firstUnreviewed : 0;
 
   renderCard();
   updateNav();
@@ -114,11 +138,13 @@ function renderCard() {
 
   const ts = m.created_at ? new Date(m.created_at * 1000).toLocaleString() : "";
   const badge = m.is_private ? '<span class="badge private">Draft</span>' : '<span class="badge">Sent</span>';
+  const isReviewed = reviewedSet.has(m.message_id);
+  const reviewedBadge = isReviewed ? ' <span class="badge reviewed-badge">Reviewed</span>' : '';
 
   document.getElementById("cardContainer").innerHTML = `
-    <div class="card">
+    <div class="card${isReviewed ? ' reviewed' : ''}">
       <div class="card-meta">
-        <span>${badge} ${m.inbox_name}</span>
+        <span>${badge}${reviewedBadge} ${m.inbox_name}</span>
         <span>${ts}</span>
         <a href="${m.conversation_url}" target="_blank">Open in Chatwoot</a>
       </div>
@@ -146,9 +172,23 @@ function renderCard() {
 function updateNav() {
   document.getElementById("prevBtn").disabled = currentIdx <= 0;
   document.getElementById("nextBtn").disabled = currentIdx >= messages.length - 1;
-  document.getElementById("counter").textContent = messages.length > 0
-    ? (currentIdx + 1) + " / " + messages.length
+  const total = messages.length;
+  const reviewedCount = messages.filter(m => reviewedSet.has(m.message_id)).length;
+  document.getElementById("counter").textContent = total > 0
+    ? (currentIdx + 1) + " / " + total + " (" + (total - reviewedCount) + " unreviewed)"
     : "0 / 0";
+}
+
+function markCurrentReviewed() {
+  const m = messages[currentIdx];
+  if (!m || reviewedSet.has(m.message_id)) return;
+  reviewedSet.add(m.message_id);
+  // Fire and forget
+  api("/review/mark-reviewed", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({message_id: m.message_id}),
+  });
 }
 
 function navigate(dir) {
@@ -157,7 +197,22 @@ function navigate(dir) {
   if (textarea && messages[currentIdx]) {
     messages[currentIdx]._correction = textarea.value;
   }
-  currentIdx = Math.max(0, Math.min(messages.length - 1, currentIdx + dir));
+  // Mark current as reviewed when navigating away
+  markCurrentReviewed();
+
+  if (document.getElementById("hideReviewed").checked) {
+    applyFilter();
+    // After filtering, find next unreviewed in the right direction
+    if (messages.length === 0) {
+      document.getElementById("cardContainer").innerHTML = '<div class="loading">All messages reviewed!</div>';
+      updateNav();
+      return;
+    }
+    currentIdx = Math.max(0, Math.min(messages.length - 1, currentIdx));
+  } else {
+    currentIdx = Math.max(0, Math.min(messages.length - 1, currentIdx + dir));
+  }
+
   renderCard();
   updateNav();
 }
@@ -221,6 +276,18 @@ document.addEventListener("keydown", e => {
   if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT") return;
   if (e.key === "ArrowLeft") navigate(-1);
   if (e.key === "ArrowRight") navigate(1);
+});
+
+// Re-filter when checkbox changes
+document.getElementById("hideReviewed").addEventListener("change", () => {
+  applyFilter();
+  if (messages.length === 0) {
+    document.getElementById("cardContainer").innerHTML = '<div class="loading">All messages reviewed!</div>';
+  } else {
+    currentIdx = Math.min(currentIdx, messages.length - 1);
+    renderCard();
+  }
+  updateNav();
 });
 
 // Initial load
