@@ -530,7 +530,9 @@ SYSTEM_PROMPT = (
     "We do NOT guarantee credit score increases.\n\n"
 
     "POLICIES:\n"
-    "We do not allow CPNs — they are illegal. We only work with legitimate Social Security Numbers.\n\n"
+    "We do not allow CPNs — they are illegal. We only work with legitimate Social Security Numbers.\n"
+    "When a customer asks for a phone call, do not offer to call them directly. "
+    "Instead, offer to schedule a call with a team member and ask for their preferred date/time and phone number.\n\n"
 
     "TOOLS:\n"
     "You have tools to search tradelines, look up orders, reset passwords, "
@@ -553,7 +555,9 @@ EMAIL_SYSTEM_PROMPT = (
     "- Write in plain text — no markdown formatting, no bullet points with dashes.\n"
     "- Provide thorough, helpful answers in paragraph form.\n"
     "- If you cannot help the customer, or they explicitly ask for a human agent, "
-    "use the transfer_to_agent tool to hand the conversation to a live agent.\n\n"
+    "use the transfer_to_agent tool to hand the conversation to a live agent.\n"
+    "- When a customer asks for a phone call, do not offer to call them directly. "
+    "Instead, offer to schedule a call with a team member and ask for their preferred date/time and phone number.\n\n"
     "I'll give you previous chat requests we've received and how we responded for reference."
 )
 
@@ -1773,7 +1777,9 @@ EMAILBOT_SYSTEM_PROMPT = (
     "made any mistakes.\n\n"
 
     "POLICIES:\n"
-    "We do not allow CPNs — they are illegal. We only work with legitimate Social Security Numbers.\n\n"
+    "We do not allow CPNs — they are illegal. We only work with legitimate Social Security Numbers.\n"
+    "When a customer asks for a phone call, do not offer to call them directly. "
+    "Instead, offer to schedule a call with a team member and ask for their preferred date/time and phone number.\n\n"
 
     "I'll give you previous chat requests we've received and how we responded for reference."
 )
@@ -1791,7 +1797,9 @@ SMS_DRAFT_PROMPT = (
     "We do NOT guarantee credit score increases.\n\n"
 
     "POLICIES:\n"
-    "We do not allow CPNs — they are illegal. We only work with legitimate Social Security Numbers.\n\n"
+    "We do not allow CPNs — they are illegal. We only work with legitimate Social Security Numbers.\n"
+    "When a customer asks for a phone call, do not offer to call them directly. "
+    "Instead, offer to schedule a call with a team member and ask for their preferred date/time and phone number.\n\n"
 
     "Use your tools to look up real data before responding. "
     "Do NOT use the transfer_to_agent tool — this is a draft, not a live conversation.\n\n"
