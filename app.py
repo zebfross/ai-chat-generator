@@ -1156,9 +1156,8 @@ def generate_bot_response(message, customer_name=None, customer_email=None,
             system += f"- Name: {customer_name}\n"
         if customer_email:
             system += f"- Email: {customer_email}\n"
-        role = _lookup_user_role(customer_email, sender_phone)
-        if role:
-            system += f"- Role: {role.capitalize()}\n"
+        role = _lookup_user_role(customer_email, sender_phone) or "unknown (likely buyer)"
+        system += f"- Role: {role.capitalize()}\n"
         system += "\n"
 
     system += context
@@ -1451,9 +1450,8 @@ def _handle_draft_message(content, conversation_id, account_id, inbox_id,
             system += f"- Name: {customer_name}\n"
         if customer_email:
             system += f"- Email: {customer_email}\n"
-        role = _lookup_user_role(customer_email, sender_phone)
-        if role:
-            system += f"- Role: {role.capitalize()}\n"
+        role = _lookup_user_role(customer_email, sender_phone) or "unknown (likely buyer)"
+        system += f"- Role: {role.capitalize()}\n"
         system += "\n"
     system += context
 
