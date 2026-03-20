@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bot Response Review</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; color: #333; padding: 20px; }
+.header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; }
+.header h1 { font-size: 1.4em; }
+.controls { display: flex; gap: 10px; align-items: center; }
+.controls input[type="date"] { padding: 6px 10px; border: 1px solid #ccc; border-radius: 4px; }
+.controls button { padding: 6px 14px; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; }
+.controls button:hover { background: #eee; }
+.counter { font-size: 0.9em; color: #666; }
+.card { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); padding: 24px; max-width: 800px; margin: 0 auto 20px; }
+.card-meta { font-size: 0.8em; color: #888; margin-bottom: 12px; display: flex; gap: 16px; flex-wrap: wrap; }
+.card-meta a { color: #2563eb; text-decoration: none; }
+.card-meta a:hover { text-decoration: underline; }
+.label { font-weight: 600; font-size: 0.85em; color: #555; margin-bottom: 4px; }
+.message-box { background: #f9f9f9; border: 1px solid #e5e5e5; border-radius: 6px; padding: 14px; margin-bottom: 16px; white-space: pre-wrap; line-height: 1.5; }
+.message-box.bot { border-left: 3px solid #2563eb; }
+.message-box.customer { border-left: 3px solid #16a34a; }
+.nav-row { display: flex; justify-content: center; gap: 12px; margin-bottom: 20px; }
+.nav-btn { width: 44px; height: 44px; border-radius: 50%; border: 1px solid #ccc; background: #fff; font-size: 1.2em; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.nav-btn:hover { background: #eee; }
+.nav-btn:disabled { opacity: 0.3; cursor: default; }
+.context-section { margin-top: 16px; }
+.context-btn { padding: 8px 16px; border: 1px solid #2563eb; color: #2563eb; background: #fff; border-radius: 4px; cursor: pointer; }
+.context-btn:hover { background: #eff6ff; }
+.context-item { background: #fafafa; border: 1px solid #e5e5e5; border-radius: 6px; padding: 12px; margin-top: 8px; }
+.context-item .score { font-size: 0.8em; color: #888; float: right; }
+.context-item .q { font-weight: 600; margin-bottom: 4px; }
+.context-item .a { color: #555; white-space: pre-wrap; }
+.correction-section { margin-top: 20px; border-top: 1px solid #e5e5e5; padding-top: 16px; }
+.correction-section textarea { width: 100%; min-height: 100px; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-family: inherit; font-size: 0.95em; resize: vertical; }
+.save-btn { margin-top: 8px; padding: 8px 20px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 0.95em; }
+.save-btn:hover { background: #1d4ed8; }
+.save-btn:disabled { opacity: 0.5; cursor: default; }
+.toast { position: fixed; bottom: 20px; right: 20px; background: #16a34a; color: #fff; padding: 10px 20px; border-radius: 6px; display: none; z-index: 100; }
+.loading { text-align: center; padding: 40px; color: #888; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75em; background: #e5e7eb; }
+.badge.private { background: #fef3c7; color: #92400e; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Bot Response Review</h1>
+  <div class="controls">
+    <label>After: <input type="date" id="dateFilter"></label>
+    <button onclick="loadMessages()">Filter</button>
+    <span class="counter" id="counter"></span>
+  </div>
+</div>
+
+<div class="nav-row">
+  <button class="nav-btn" id="prevBtn" onclick="navigate(-1)" disabled>&larr;</button>
+  <button class="nav-btn" id="nextBtn" onclick="navigate(1)" disabled>&rarr;</button>
+</div>
+
+<div id="cardContainer">
+  <div class="loading" id="loadingMsg">Loading messages...</div>
+</div>
+
+<div id="toast" class="toast">Saved to Pinecone!</div>
+
+<script>
+const KEY = "{{ review_key }}";
+const BASE = window.location.origin;
+let messages = [];
+let currentIdx = 0;
+
+async function api(path, opts) {
+  const sep = path.includes("?") ? "&" : "?";
+  const resp = await fetch(BASE + path + sep + "key=" + KEY, opts);
+  return resp.json();
+}
+
+async function loadMessages() {
+  const after = document.getElementById("dateFilter").value;
+  const container = document.getElementById("cardContainer");
+  container.innerHTML = '<div class="loading">Loading messages...</div>';
+  messages = [];
+  currentIdx = 0;
+
+  let page = 1;
+  // Load up to 5 pages
+  while (page <= 5) {
+    let url = "/review/messages?page=" + page;
+    if (after) url += "&after=" + after + "T00:00:00";
+    const data = await api(url);
+    if (!data.messages || data.messages.length === 0) break;
+    messages = messages.concat(data.messages);
+    page++;
+  }
+
+  if (messages.length === 0) {
+    container.innerHTML = '<div class="loading">No bot messages found.</div>';
+    updateNav();
+    return;
+  }
+
+  renderCard();
+  updateNav();
+}
+
+function renderCard() {
+  const m = messages[currentIdx];
+  if (!m) return;
+
+  const ts = m.created_at ? new Date(m.created_at * 1000).toLocaleString() : "";
+  const badge = m.is_private ? '<span class="badge private">Draft</span>' : '<span class="badge">Sent</span>';
+
+  document.getElementById("cardContainer").innerHTML = `
+    <div class="card">
+      <div class="card-meta">
+        <span>${badge} ${m.inbox_name}</span>
+        <span>${ts}</span>
+        <a href="${m.conversation_url}" target="_blank">Open in Chatwoot</a>
+      </div>
+
+      <div class="label">Customer Message</div>
+      <div class="message-box customer">${escHtml(m.customer_message || "(no preceding message found)")}</div>
+
+      <div class="label">Bot Response</div>
+      <div class="message-box bot">${escHtml(m.bot_response)}</div>
+
+      <div class="context-section">
+        <button class="context-btn" onclick="loadContext(${currentIdx})">Show Pinecone Context</button>
+        <div id="contextResults"></div>
+      </div>
+
+      <div class="correction-section">
+        <div class="label">Corrected Response (save to Pinecone as ideal Q&amp;A)</div>
+        <textarea id="correctionText" placeholder="Write the ideal response here...">${escHtml(m._correction || "")}</textarea>
+        <button class="save-btn" id="saveBtn" onclick="saveCorrection(${currentIdx})">Save to Pinecone</button>
+      </div>
+    </div>
+  `;
+}
+
+function updateNav() {
+  document.getElementById("prevBtn").disabled = currentIdx <= 0;
+  document.getElementById("nextBtn").disabled = currentIdx >= messages.length - 1;
+  document.getElementById("counter").textContent = messages.length > 0
+    ? (currentIdx + 1) + " / " + messages.length
+    : "0 / 0";
+}
+
+function navigate(dir) {
+  // Save any in-progress correction text
+  const textarea = document.getElementById("correctionText");
+  if (textarea && messages[currentIdx]) {
+    messages[currentIdx]._correction = textarea.value;
+  }
+  currentIdx = Math.max(0, Math.min(messages.length - 1, currentIdx + dir));
+  renderCard();
+  updateNav();
+}
+
+async function loadContext(idx) {
+  const m = messages[idx];
+  const query = m.customer_message || m.bot_response;
+  if (!query) return;
+
+  const container = document.getElementById("contextResults");
+  container.innerHTML = '<div class="loading">Loading context...</div>';
+
+  const data = await api("/review/context?query=" + encodeURIComponent(query));
+  if (!data.context || data.context.length === 0) {
+    container.innerHTML = '<div class="context-item">No similar Q&A found.</div>';
+    return;
+  }
+
+  container.innerHTML = data.context.map(c => `
+    <div class="context-item">
+      <span class="score">${c.score}</span>
+      <div class="q">Q: ${escHtml(c.question)}</div>
+      <div class="a">A: ${escHtml(c.answer)}</div>
+    </div>
+  `).join("");
+}
+
+async function saveCorrection(idx) {
+  const m = messages[idx];
+  const answer = document.getElementById("correctionText").value.trim();
+  if (!answer) return;
+
+  const question = m.customer_message;
+  if (!question) { alert("No customer message to use as question."); return; }
+
+  const btn = document.getElementById("saveBtn");
+  btn.disabled = true;
+  btn.textContent = "Saving...";
+
+  await api("/review/correct", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({question, answer}),
+  });
+
+  btn.textContent = "Save to Pinecone";
+  btn.disabled = false;
+
+  const toast = document.getElementById("toast");
+  toast.style.display = "block";
+  setTimeout(() => toast.style.display = "none", 2000);
+}
+
+function escHtml(s) {
+  if (!s) return "";
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+// Keyboard navigation
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT") return;
+  if (e.key === "ArrowLeft") navigate(-1);
+  if (e.key === "ArrowRight") navigate(1);
+});
+
+// Initial load
+loadMessages();
+</script>
+</body>
+</html>

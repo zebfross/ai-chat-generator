@@ -15,7 +15,7 @@ start_time = time.time()
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, render_template, Response
 from flask_cors import CORS
 
 try:
@@ -1888,6 +1888,160 @@ def ocr_image():
         logging.exception("OCR error")
         return jsonify({"error": str(e)}), 500
 
+
+# ── Bot Response Review Tool ────────────────────────────────────────────
+
+REVIEW_KEY = os.environ.get("REVIEW_KEY", "")
+
+
+def _check_review_key():
+    """Return True if the request carries a valid review key, else False."""
+    if not REVIEW_KEY:
+        return False
+    return request.args.get("key") == REVIEW_KEY
+
+
+@MyApp.route("/review")
+def review_page():
+    if not _check_review_key():
+        return "Unauthorized", 401
+    return render_template("review.html", review_key=REVIEW_KEY)
+
+
+@MyApp.route("/review/messages")
+def review_messages():
+    if not _check_review_key():
+        return jsonify({"error": "unauthorized"}), 401
+
+    page = request.args.get("page", 1, type=int)
+    after = request.args.get("after", "")  # ISO date string
+    account_id = CHATWOOT_ACCOUNT_ID
+
+    # Fetch conversations from Chatwoot (sorted newest first)
+    params = {"page": page}
+    url = f"{CHATWOOT_URL}/api/v1/accounts/{account_id}/conversations"
+    headers = {"api_access_token": CHATWOOT_USER_TOKEN}
+
+    try:
+        resp = http_requests.get(url, headers=headers, params=params, timeout=15)
+        resp.raise_for_status()
+        conversations = resp.json().get("data", {}).get("payload", [])
+    except Exception as e:
+        logging.exception("review: failed to fetch conversations")
+        return jsonify({"error": str(e)}), 500
+
+    results = []
+    for conv in conversations:
+        conv_id = conv.get("id")
+        inbox = conv.get("inbox", {}) or {}
+        inbox_name = inbox.get("name") or conv.get("meta", {}).get("channel", "Unknown")
+
+        # Fetch messages for this conversation
+        msgs_url = f"{CHATWOOT_URL}/api/v1/accounts/{account_id}/conversations/{conv_id}/messages"
+        try:
+            msgs_resp = http_requests.get(msgs_url, headers=headers, timeout=10)
+            msgs_resp.raise_for_status()
+            messages = msgs_resp.json().get("payload", [])
+        except Exception:
+            continue
+
+        # Sort chronologically
+        messages.sort(key=lambda m: m.get("id", 0))
+
+        # Find bot responses: private whispers (drafts) or outgoing from bot
+        for i, msg in enumerate(messages):
+            msg_type = msg.get("message_type")  # 0=incoming, 1=outgoing, 2=activity
+            is_private = msg.get("private", False)
+            content = (msg.get("content") or "").strip()
+            created = msg.get("created_at")
+
+            if not content:
+                continue
+
+            # Apply date filter
+            if after and created:
+                try:
+                    msg_time = datetime.utcfromtimestamp(created)
+                    after_time = datetime.fromisoformat(after.replace("Z", "+00:00").replace("+00:00", ""))
+                    if msg_time < after_time:
+                        continue
+                except Exception:
+                    pass
+
+            # Bot responses are either:
+            # 1. Private notes (whispers) — drafts for email/SMS
+            # 2. Outgoing messages from the bot agent (msg_type=1 with no human sender)
+            is_bot_whisper = is_private and msg_type == 1
+            sender = msg.get("sender") or {}
+            is_bot_outgoing = (msg_type == 1 and not is_private
+                               and sender.get("type") == "agent_bot")
+
+            if not (is_bot_whisper or is_bot_outgoing):
+                continue
+
+            # Find the preceding customer message
+            customer_message = ""
+            for j in range(i - 1, -1, -1):
+                prev = messages[j]
+                if prev.get("message_type") == 0 and (prev.get("content") or "").strip():
+                    customer_message = prev["content"].strip()
+                    break
+
+            results.append({
+                "customer_message": customer_message,
+                "bot_response": content,
+                "conversation_id": conv_id,
+                "message_id": msg.get("id"),
+                "created_at": created,
+                "inbox_name": inbox_name,
+                "is_private": is_private,
+                "conversation_url": f"{CHATWOOT_URL}/app/accounts/{account_id}/conversations/{conv_id}",
+            })
+
+    # Sort newest first
+    results.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+
+    return jsonify({"messages": results, "page": page})
+
+
+@MyApp.route("/review/context")
+def review_context():
+    if not _check_review_key():
+        return jsonify({"error": "unauthorized"}), 401
+
+    query = request.args.get("query", "").strip()
+    if not query:
+        return jsonify({"error": "query param required"}), 400
+
+    results = search_similar_chats(index, query, top_k=5)
+    items = []
+    for match in results.get("matches", []):
+        items.append({
+            "score": round(match["score"], 4),
+            "question": match["metadata"].get("chat_message", ""),
+            "answer": match["metadata"].get("response", ""),
+        })
+
+    return jsonify({"context": items})
+
+
+@MyApp.route("/review/correct", methods=["POST"])
+def review_correct():
+    if not _check_review_key():
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    question = (data.get("question") or "").strip()
+    answer = (data.get("answer") or "").strip()
+
+    if not question or not answer:
+        return jsonify({"error": "question and answer required"}), 400
+
+    store_chat(index, question, answer, datetime.utcnow().isoformat())
+    return jsonify({"status": "saved"})
+
+
+# ── Catch-all (must be last) ───────────────────────────────────────────
 
 @MyApp.route(
     "/",
