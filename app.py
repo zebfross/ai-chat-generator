@@ -1893,6 +1893,11 @@ def ocr_image():
 
 REVIEW_KEY = os.environ.get("REVIEW_KEY", "")
 
+# iPhone tapback reactions: Liked "...", Loved "...", etc.
+_TAPBACK_RE = re.compile(
+    r'^(Liked|Loved|Disliked|Laughed at|Emphasized|Questioned)\s+"', re.IGNORECASE
+)
+
 
 def _check_review_key():
     """Return True if the request carries a valid review key, else False."""
@@ -1958,6 +1963,10 @@ def review_messages():
             if not content:
                 continue
 
+            # Skip iPhone tapback reactions
+            if _TAPBACK_RE.match(content):
+                continue
+
             # Apply date filter
             if after and created:
                 try:
@@ -1979,12 +1988,14 @@ def review_messages():
             if not (is_bot_whisper or is_bot_outgoing):
                 continue
 
-            # Find the preceding customer message
+            # Find the preceding customer message (skip tapback reactions)
             customer_message = ""
             for j in range(i - 1, -1, -1):
                 prev = messages[j]
-                if prev.get("message_type") == 0 and (prev.get("content") or "").strip():
-                    customer_message = prev["content"].strip()
+                prev_content = (prev.get("content") or "").strip()
+                if (prev.get("message_type") == 0 and prev_content
+                        and not _TAPBACK_RE.match(prev_content)):
+                    customer_message = prev_content
                     break
 
             results.append({
