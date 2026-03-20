@@ -2013,6 +2013,10 @@ def review_messages():
                     customer_message = prev_content
                     break
 
+            # Skip if the customer message that triggered this was a tapback
+            if customer_message and _TAPBACK_RE.match(customer_message):
+                continue
+
             results.append({
                 "customer_message": customer_message,
                 "bot_response": content,
