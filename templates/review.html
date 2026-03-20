@@ -149,7 +149,7 @@ function renderCard() {
   const reviewedBadge = isReviewed ? ' <span class="badge reviewed-badge">Reviewed</span>' : '';
 
   document.getElementById("cardContainer").innerHTML = `
-    <div class="card">`
+    <div class="card">
       <div class="card-meta">
         <span>${badge}${reviewedBadge} ${m.inbox_name}</span>
         <span>${ts}</span>
