@@ -619,7 +619,8 @@ TOOLS = [
         "name": "order_lookup",
         "description": (
             "Look up a customer's active tradeline orders by their email address. "
-            "Use this when a customer asks about the status of their order(s)."
+            "Use this when a customer asks about the status of their order(s), "
+            "payment dates, posting dates, or any details about their current orders."
         ),
         "input_schema": {
             "type": "object",
@@ -747,6 +748,45 @@ TOOLS = [
             "required": ["article_id"],
         },
     },
+    {
+        "name": "create_verification",
+        "description": (
+            "Generate a Stripe Identity verification link for a customer. "
+            "Use this when a customer needs to verify their identity "
+            "(e.g., for a new order or re-verification). Returns a URL "
+            "the customer can visit to complete ID verification."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "description": "The customer's email address.",
+                },
+                "allowed_types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Document types to accept. Options: 'driving_license', "
+                        "'id_card', 'passport'. Defaults to all three."
+                    ),
+                },
+                "require_selfie": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether to require a matching selfie. Default true."
+                    ),
+                },
+                "require_id_number": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether to require SSN/ID number. Default true."
+                    ),
+                },
+            },
+            "required": ["email"],
+        },
+    },
 ]
 
 
@@ -820,6 +860,8 @@ def _execute_tool(name: str, tool_input: dict, customer_email: str = None,
         return _tool_create_task(tool_input, conversation_id, account_id)
     if name == "search_knowledge":
         return _tool_search_knowledge(tool_input)
+    if name == "create_verification":
+        return _tool_create_verification(tool_input, customer_email)
     return f"Unknown tool: {name}"
 
 
@@ -842,6 +884,36 @@ def _tool_search_knowledge(tool_input: dict) -> str:
         return f"**{data.get('title', '')}**\n\n{data.get('content', '')}"
     except Exception as exc:
         return f"Knowledge base lookup error: {exc}"
+
+
+def _tool_create_verification(tool_input: dict, customer_email: str = None) -> str:
+    """Create a Stripe Identity verification session via the TW API."""
+    email = tool_input.get("email") or customer_email
+    if not email:
+        return "Error: email is required."
+    payload = {"email": email}
+    if "allowed_types" in tool_input:
+        payload["allowed_types"] = tool_input["allowed_types"]
+    if "require_selfie" in tool_input:
+        payload["require_selfie"] = tool_input["require_selfie"]
+    if "require_id_number" in tool_input:
+        payload["require_id_number"] = tool_input["require_id_number"]
+    if "return_url" in tool_input:
+        payload["return_url"] = tool_input["return_url"]
+    try:
+        resp = requests.post(
+            f"{TW_BASE_URL}/wp-json/tw/v1/bot/create-verification",
+            json=payload,
+            headers=_tw_headers(),
+            verify=TW_VERIFY_SSL,
+            timeout=15,
+        )
+        if not resp.ok:
+            return f"Verification link creation failed (HTTP {resp.status_code}): {resp.text}"
+        data = resp.json()
+        return f"Verification link created: {data.get('verification_url', 'N/A')}"
+    except Exception as exc:
+        return f"Verification link error: {exc}"
 
 
 def _tool_search_tradelines(tool_input: dict) -> str:
