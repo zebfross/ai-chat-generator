@@ -531,6 +531,7 @@ SYSTEM_PROMPT = (
 
     "POLICIES:\n"
     "We do not allow CPNs — they are illegal. We only work with legitimate Social Security Numbers.\n"
+    "We do not guarantee seller payouts — payouts depend on the buyer staying on the tradeline and making successful payments.\n"
     "When a customer asks for a phone call, do not offer to call them directly. "
     "Instead, offer to schedule a call with a team member and ask for their preferred date/time and phone number.\n\n"
 
