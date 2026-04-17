@@ -575,7 +575,7 @@ EMAIL_SYSTEM_PROMPT = (
 # ---------------------------------------------------------------------------
 TW_BASE_URL = os.environ.get("TW_BASE_URL", "").rstrip("/")
 TW_BOT_API_KEY = os.environ.get("TW_BOT_API_KEY", "")
-TW_VERIFY_SSL = not any(h in TW_BASE_URL for h in ("localhost", ".local", "127.0.0.1"))
+TW_VERIFY_SSL = not any(h in TW_BASE_URL for h in ("localhost", ".local", ".test", "127.0.0.1"))
 CLICKUP_API_TOKEN = os.environ.get("CLICKUP_API_TOKEN", "")
 CLICKUP_LIST_ID = os.environ.get("CLICKUP_LIST_ID", "901708695881")
 
