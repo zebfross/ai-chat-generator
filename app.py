@@ -533,7 +533,8 @@ SYSTEM_PROMPT = (
     "We do not allow CPNs — they are illegal. We only work with legitimate Social Security Numbers.\n"
     "We do not guarantee seller payouts — payouts depend on the buyer staying on the tradeline and making successful payments.\n"
     "When a customer asks for a phone call, do not offer to call them directly. "
-    "Instead, offer to schedule a call with a team member and ask for their preferred date/time and phone number.\n\n"
+    "Instead, share this scheduling link so they can book a call: "
+    "https://calendar.google.com/calendar/u/0/appointments/schedules/AcZssZ0wNCGZTSpEY2fI6wPXSQU9jEr-hPa9hK8nkWTqQhJHWFkaVIRePrl_Xvlw5rkYiWpwAkEqCmmw\n\n"
 
     "TOOLS:\n"
     "You have tools to search tradelines, look up orders, reset passwords, "
@@ -561,7 +562,8 @@ EMAIL_SYSTEM_PROMPT = (
     "- If you cannot help the customer, or they explicitly ask for a human agent, "
     "use the transfer_to_agent tool to hand the conversation to a live agent.\n"
     "- When a customer asks for a phone call, do not offer to call them directly. "
-    "Instead, offer to schedule a call with a team member and ask for their preferred date/time and phone number.\n"
+    "Instead, share this scheduling link so they can book a call: "
+    "https://calendar.google.com/calendar/u/0/appointments/schedules/AcZssZ0wNCGZTSpEY2fI6wPXSQU9jEr-hPa9hK8nkWTqQhJHWFkaVIRePrl_Xvlw5rkYiWpwAkEqCmmw\n"
     "- Use your tools (search tradelines, look up orders, search knowledgebase, etc.) "
     "to find accurate information before responding.\n\n"
     "I'll give you previous chat requests we've received and how we responded for reference."
@@ -576,10 +578,6 @@ TW_BOT_API_KEY = os.environ.get("TW_BOT_API_KEY", "")
 TW_VERIFY_SSL = not any(h in TW_BASE_URL for h in ("localhost", ".local", "127.0.0.1"))
 CLICKUP_API_TOKEN = os.environ.get("CLICKUP_API_TOKEN", "")
 CLICKUP_LIST_ID = os.environ.get("CLICKUP_LIST_ID", "901708695881")
-PIPEDRIVE_API_TOKEN = os.environ.get("PIPEDRIVE_API_TOKEN", "")
-PIPEDRIVE_STAGE_ID = int(os.environ.get("PIPEDRIVE_STAGE_ID", "0"))
-SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
-SENDGRID_LIST_ID = os.environ.get("SENDGRID_LIST_ID", "")
 
 TOOLS = [
     {
@@ -788,6 +786,107 @@ TOOLS = [
             "required": ["email"],
         },
     },
+    {
+        "name": "get_user",
+        "description": (
+            "Look up a TradelineWorks user by email or phone number. "
+            "Returns their name, phone number, roles, and registration date. "
+            "Use this to get contact info or determine if someone is a buyer, seller, or salesperson."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "description": "The user's email address.",
+                },
+                "phone": {
+                    "type": "string",
+                    "description": "The user's phone number (any format).",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_calendar_events",
+        "description": (
+            "Fetch raw calendar events for a date range. "
+            "Use this to check staff schedules and answer questions like "
+            "'is Porsha available tomorrow?' by interpreting event titles "
+            "(e.g. 'Porsha Off' means unavailable, 'Alex 1-3' means Alex works 1-3pm)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "description": "Start date in YYYY-MM-DD format. Defaults to today.",
+                },
+                "days": {
+                    "type": "integer",
+                    "description": "Number of days to fetch (1-14). Defaults to 1.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_calendar_availability",
+        "description": (
+            "Get available 30-minute appointment slots during business hours "
+            "(9am-5pm ET, weekdays only). Use this when a customer wants to "
+            "schedule a call or meeting and needs to see open time slots."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "description": "Start date in YYYY-MM-DD format. Defaults to today.",
+                },
+                "days": {
+                    "type": "integer",
+                    "description": "Number of days to check (1-14). Defaults to 3.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "create_calendar_event",
+        "description": (
+            "Create a calendar event and send invites. "
+            "Use this to book a meeting or call with a customer. "
+            "Always confirm the time with the customer before creating the event."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "Event title (e.g. 'Call with John Smith').",
+                },
+                "start_time": {
+                    "type": "string",
+                    "description": "Start time in YYYY-MM-DD HH:MM format (Eastern Time).",
+                },
+                "duration": {
+                    "type": "integer",
+                    "description": "Duration in minutes (15-120). Defaults to 30.",
+                },
+                "attendee": {
+                    "type": "string",
+                    "description": "Attendee email address to send an invite to.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional event description or notes.",
+                },
+            },
+            "required": ["summary", "start_time"],
+        },
+    },
 ]
 
 
@@ -819,8 +918,8 @@ def _fetch_knowledge_titles() -> str:
 _KNOWLEDGE_TITLES = _fetch_knowledge_titles() if TW_BASE_URL else ""
 
 
-def _lookup_user_role(email: str = None, phone: str = None) -> str | None:
-    """Look up whether a customer is a buyer or seller via the WP endpoint."""
+def _lookup_user_info(email: str = None, phone: str = None) -> dict | None:
+    """Look up a user's full profile (name, email, phone, roles) via the WP endpoint."""
     if not email and not phone:
         return None
     params = {}
@@ -830,13 +929,13 @@ def _lookup_user_role(email: str = None, phone: str = None) -> str | None:
         params["phone"] = phone
     try:
         resp = requests.get(
-            f"{TW_BASE_URL}/wp-json/tw/v1/bot/user-role",
+            f"{TW_BASE_URL}/wp-json/tw/v1/bot/user",
             params=params,
             headers=_tw_headers(),
             timeout=5,
         )
         if resp.ok:
-            return resp.json().get("role")
+            return resp.json()
     except Exception:
         pass
     return None
@@ -863,6 +962,14 @@ def _execute_tool(name: str, tool_input: dict, customer_email: str = None,
         return _tool_search_knowledge(tool_input)
     if name == "create_verification":
         return _tool_create_verification(tool_input, customer_email)
+    if name == "get_user":
+        return _tool_get_user(tool_input)
+    if name == "get_calendar_events":
+        return _tool_get_calendar_events(tool_input)
+    if name == "get_calendar_availability":
+        return _tool_get_calendar_availability(tool_input)
+    if name == "create_calendar_event":
+        return _tool_create_calendar_event(tool_input)
     return f"Unknown tool: {name}"
 
 
@@ -915,6 +1022,114 @@ def _tool_create_verification(tool_input: dict, customer_email: str = None) -> s
         return f"Verification link created: {data.get('verification_url', 'N/A')}"
     except Exception as exc:
         return f"Verification link error: {exc}"
+
+
+def _tool_get_user(tool_input: dict) -> str:
+    """Look up a TradelineWorks user by email or phone via the TW API."""
+    email = tool_input.get("email", "").strip()
+    phone = tool_input.get("phone", "").strip()
+    if not email and not phone:
+        return "Error: email or phone is required."
+    info = _lookup_user_info(email=email or None, phone=phone or None)
+    if not info:
+        return "No user found matching that email or phone number."
+    lines = []
+    if info.get("name"):
+        lines.append(f"Name: {info['name']}")
+    if info.get("email"):
+        lines.append(f"Email: {info['email']}")
+    if info.get("phone"):
+        lines.append(f"Phone: {info['phone']}")
+    if info.get("role"):
+        lines.append(f"Role: {info['role']}")
+    if info.get("registered"):
+        lines.append(f"Registered: {info['registered']}")
+    return "\n".join(lines) if lines else str(info)
+
+
+def _tool_get_calendar_events(tool_input: dict) -> str:
+    """Fetch raw calendar events for a date range via the TW API."""
+    params = {}
+    if tool_input.get("date"):
+        params["date"] = tool_input["date"]
+    if tool_input.get("days"):
+        params["days"] = tool_input["days"]
+    try:
+        resp = requests.get(
+            f"{TW_BASE_URL}/wp-json/tw/v1/bot/calendar-events",
+            params=params,
+            headers=_tw_headers(),
+            verify=TW_VERIFY_SSL,
+            timeout=10,
+        )
+        if not resp.ok:
+            return f"Calendar events lookup failed (HTTP {resp.status_code})."
+        data = resp.json()
+        if not data.get("events"):
+            return "No calendar events found for the requested date range."
+        lines = []
+        for event in data["events"]:
+            lines.append(f"- {event.get('start', '')} — {event.get('summary', '')}")
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Calendar events error: {exc}"
+
+
+def _tool_get_calendar_availability(tool_input: dict) -> str:
+    """Get available appointment slots via the TW API."""
+    params = {}
+    if tool_input.get("date"):
+        params["date"] = tool_input["date"]
+    if tool_input.get("days"):
+        params["days"] = tool_input["days"]
+    try:
+        resp = requests.get(
+            f"{TW_BASE_URL}/wp-json/tw/v1/bot/calendar-availability",
+            params=params,
+            headers=_tw_headers(),
+            verify=TW_VERIFY_SSL,
+            timeout=10,
+        )
+        if not resp.ok:
+            return f"Availability lookup failed (HTTP {resp.status_code})."
+        data = resp.json()
+        if not data.get("slots"):
+            return "No available slots found for the requested date range."
+        lines = []
+        for slot in data["slots"]:
+            lines.append(f"- {slot.get('start', '')} to {slot.get('end', '')}")
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Availability lookup error: {exc}"
+
+
+def _tool_create_calendar_event(tool_input: dict) -> str:
+    """Create a calendar event via the TW API."""
+    summary = tool_input.get("summary")
+    start_time = tool_input.get("start_time")
+    if not summary or not start_time:
+        return "Error: summary and start_time are required."
+    payload = {"summary": summary, "start_time": start_time}
+    if tool_input.get("duration"):
+        payload["duration"] = tool_input["duration"]
+    if tool_input.get("attendee"):
+        payload["attendee"] = tool_input["attendee"]
+    if tool_input.get("description"):
+        payload["description"] = tool_input["description"]
+    try:
+        resp = requests.post(
+            f"{TW_BASE_URL}/wp-json/tw/v1/bot/calendar-event",
+            json=payload,
+            headers=_tw_headers(),
+            verify=TW_VERIFY_SSL,
+            timeout=15,
+        )
+        if not resp.ok:
+            return f"Failed to create calendar event (HTTP {resp.status_code}): {resp.text}"
+        data = resp.json()
+        return f"Calendar event created: {data.get('summary', summary)} at {data.get('start', start_time)}"
+    except Exception as exc:
+        return f"Calendar event creation error: {exc}"
 
 
 def _tool_search_tradelines(tool_input: dict) -> str:
@@ -1274,8 +1489,8 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
 
 
 def generate_bot_response(message, customer_name=None, customer_email=None,
-                          conversation_history=None, account_id=None,
-                          conversation_id=None, inbox_id=None):
+                          sender_phone=None, conversation_history=None,
+                          account_id=None, conversation_id=None, inbox_id=None):
     """Run Pinecone similarity search + Anthropic completion for a user message."""
     results = search_similar_chats(index, message)
 
@@ -1288,6 +1503,12 @@ def generate_bot_response(message, customer_name=None, customer_email=None,
         context += "\nChat: " + result["metadata"]["chat_message"]
         context += "\nResponse: " + result["metadata"]["response"]
         context += "\n---\n"
+
+    # Enrich customer info from WP user lookup
+    user_info = _lookup_user_info(customer_email, sender_phone)
+    if user_info:
+        customer_name = customer_name or user_info.get("name")
+        customer_email = customer_email or user_info.get("email")
 
     is_email = inbox_id in EMAIL_INBOX_IDS
     base_prompt = EMAIL_SYSTEM_PROMPT if is_email else SYSTEM_PROMPT
@@ -1303,7 +1524,7 @@ def generate_bot_response(message, customer_name=None, customer_email=None,
             system += f"- Name: {customer_name}\n"
         if customer_email:
             system += f"- Email: {customer_email}\n"
-        role = _lookup_user_role(customer_email, sender_phone) or "unknown (likely buyer)"
+        role = (user_info or {}).get("role") or "unknown (likely buyer)"
         system += f"- Role: {role.capitalize()}\n"
         system += "\n"
 
@@ -1443,7 +1664,11 @@ def chatwoot_webhook():
 
     event = data.get("event")
 
-    # Handle conversation resolved → push to Pipedrive/SendGrid
+    # Handle new conversation → create contact in Pipedrive/SendGrid (no transcript yet)
+    if event == "conversation_created":
+        return _handle_conversation_created(data)
+
+    # Handle conversation resolved → push transcript to Pipedrive/SendGrid
     if event == "conversation_status_changed":
         return _handle_conversation_status_changed(data)
 
@@ -1540,7 +1765,7 @@ def _handle_chat_message(content, conversation_id, account_id, inbox_id,
 
     bot_reply, transfer_requested = generate_bot_response(
         content, customer_name=customer_name, customer_email=customer_email,
-        conversation_history=conversation_history,
+        sender_phone=sender_phone, conversation_history=conversation_history,
         account_id=account_id, conversation_id=conversation_id,
         inbox_id=inbox_id,
     )
@@ -1591,13 +1816,19 @@ def _handle_draft_message(content, conversation_id, account_id, inbox_id,
 
     base_prompt = EMAILBOT_SYSTEM_PROMPT if is_email else SMS_DRAFT_PROMPT
     system = base_prompt + "\n\n"
+    # Enrich customer info from WP user lookup
+    user_info = _lookup_user_info(customer_email, sender_phone)
+    if user_info:
+        customer_name = customer_name or user_info.get("name")
+        customer_email = customer_email or user_info.get("email")
+
     if customer_name or customer_email or sender_phone:
         system += "Current customer info:\n"
         if customer_name:
             system += f"- Name: {customer_name}\n"
         if customer_email:
             system += f"- Email: {customer_email}\n"
-        role = _lookup_user_role(customer_email, sender_phone) or "unknown (likely buyer)"
+        role = (user_info or {}).get("role") or "unknown (likely buyer)"
         system += f"- Role: {role.capitalize()}\n"
         system += "\n"
     system += context
@@ -1672,8 +1903,75 @@ def _run_taskbot_analysis(content, conversation_id, account_id,
 # CRM Integration — Pipedrive + SendGrid on conversation resolved
 # ---------------------------------------------------------------------------
 
+def _sync_conversation_to_crm(data, include_transcript, event_name):
+    """Shared CRM sync path — forwards contact + optional transcript to the WP LHC endpoint."""
+    conversation = data.get("conversation") or data
+    conversation_id = conversation.get("id")
+    account_id = data.get("account", {}).get("id")
+
+    if not conversation_id or not account_id:
+        return jsonify({"error": "missing conversation_id or account_id"}), 400
+
+    meta = conversation.get("meta") or {}
+    sender = meta.get("sender") or data.get("sender") or {}
+    name = (sender.get("name") or "").strip()
+    email = (sender.get("email") or "").strip()
+    phone = (sender.get("phone_number") or "").strip()
+
+    if not email and not phone:
+        logging.info("[CRM] No email or phone for conversation %s, skipping", conversation_id)
+        return jsonify({"status": "ignored", "reason": "no contact info"}), 200
+
+    sender_id = email or phone or name
+    if _is_sender_excluded(sender_id):
+        logging.info("[CRM] Skipping excluded sender: %s", sender_id)
+        return jsonify({"status": "ignored", "reason": "excluded sender"}), 200
+
+    inbox = data.get("inbox") or {}
+    channel_type = inbox.get("channel_type") or ""
+    if "Internal" in channel_type:
+        return jsonify({"status": "ignored", "reason": "internal channel"}), 200
+
+    payload = {
+        "event": event_name,
+        "chat": {
+            "id": conversation_id,
+            "nick": name,
+            "email": email,
+            "phone": phone,
+            "url": f"{CHATWOOT_URL}/app/accounts/{account_id}/conversations/{conversation_id}",
+        },
+    }
+    if include_transcript:
+        payload["messages"] = _build_chat_messages(account_id, conversation_id)
+
+    try:
+        resp = http_requests.post(
+            f"{TW_BASE_URL}/wp-json/cmfs/v1/lhc",
+            json=payload,
+            verify=TW_VERIFY_SSL,
+            timeout=20,
+        )
+        if resp.ok:
+            logging.info("[CRM] Synced conversation %s (%s) to LHC endpoint", conversation_id, event_name)
+        else:
+            logging.error("[CRM] LHC sync failed (HTTP %s): %s", resp.status_code, resp.text[:300])
+    except Exception:
+        logging.exception("[CRM] LHC sync error")
+
+    return jsonify({"status": "ok"}), 200
+
+
+def _handle_conversation_created(data):
+    """When a new conversation is opened, create contact in CRM (no transcript)."""
+    conversation = data.get("conversation") or data
+    conversation_id = conversation.get("id")
+    logging.info("[CRM] Conversation %s created — creating CRM contact", conversation_id)
+    return _sync_conversation_to_crm(data, include_transcript=False, event_name="chat.chat_started")
+
+
 def _handle_conversation_status_changed(data):
-    """When a conversation is resolved, push contact + transcript to Pipedrive and SendGrid."""
+    """When a conversation is resolved, push transcript to CRM."""
     conversation = data.get("conversation") or data
     status = (conversation.get("status") or "").lower()
 
@@ -1681,194 +1979,23 @@ def _handle_conversation_status_changed(data):
         return jsonify({"status": "ignored", "reason": f"status is {status}, not resolved"}), 200
 
     conversation_id = conversation.get("id")
-    account_id = data.get("account", {}).get("id")
-    inbox_id = conversation.get("inbox_id")
-
-    if not conversation_id or not account_id:
-        return jsonify({"error": "missing conversation_id or account_id"}), 400
-
-    # Get contact info from the conversation meta
-    meta = conversation.get("meta") or {}
-    sender = meta.get("sender") or data.get("sender") or {}
-    name = (sender.get("name") or "").strip()
-    email = (sender.get("email") or "").strip()
-    phone = (sender.get("phone_number") or "").strip()
-
-    # Skip if no contact info
-    if not email and not phone:
-        logging.info("[CRM] No email or phone for conversation %s, skipping", conversation_id)
-        return jsonify({"status": "ignored", "reason": "no contact info"}), 200
-
-    # Skip excluded senders
-    sender_id = email or phone or name
-    if _is_sender_excluded(sender_id):
-        logging.info("[CRM] Skipping excluded sender: %s", sender_id)
-        return jsonify({"status": "ignored", "reason": "excluded sender"}), 200
-
-    # Skip internal chat inbox
-    inbox = data.get("inbox") or {}
-    channel_type = inbox.get("channel_type") or ""
-    if "Internal" in channel_type:
-        return jsonify({"status": "ignored", "reason": "internal channel"}), 200
-
-    logging.info("[CRM] Conversation %s resolved — syncing %s to CRM", conversation_id, sender_id)
-
-    # Fetch transcript
-    transcript = _build_transcript(account_id, conversation_id)
-
-    # Push to Pipedrive
-    if PIPEDRIVE_API_TOKEN and PIPEDRIVE_STAGE_ID:
-        try:
-            _pipedrive_sync(name, email, phone, transcript, conversation_id, account_id)
-        except Exception:
-            logging.exception("[CRM] Pipedrive sync error")
-
-    # Push to SendGrid
-    if SENDGRID_API_KEY and SENDGRID_LIST_ID:
-        try:
-            _sendgrid_sync(email, name, phone)
-        except Exception:
-            logging.exception("[CRM] SendGrid sync error")
+    logging.info("[CRM] Conversation %s resolved — syncing transcript to CRM", conversation_id)
+    return _sync_conversation_to_crm(data, include_transcript=True, event_name="chat.chat_closed")
 
     return jsonify({"status": "ok", "synced": True}), 200
 
 
-def _build_transcript(account_id, conversation_id):
-    """Build an HTML transcript from a Chatwoot conversation."""
+def _build_chat_messages(account_id, conversation_id):
+    """Return a list of {time, name, msg} dicts for the LHC endpoint."""
     messages = fetch_conversation_messages(account_id, conversation_id)
-    if not messages:
-        return "No messages in conversation."
-
-    lines = []
-    for m in messages:
-        who = "Customer" if m["role"] == "user" else "Agent"
-        content = m["content"].replace("\n", "<br />")
-        lines.append(f"<strong>{who}</strong>: {content}")
-    return "<br />\n".join(lines)
-
-
-def _pipedrive_sync(name, email, phone, transcript, conversation_id, account_id):
-    """Find/create person in Pipedrive, create deal with transcript."""
-    base = "https://api.pipedrive.com/v1"
-    params = {"api_token": PIPEDRIVE_API_TOKEN}
-
-    # 1. Search for existing person by email or phone
-    person_id = None
-    if email:
-        resp = http_requests.get(f"{base}/persons/search",
-                                  params={**params, "term": email, "fields": "email", "exact_match": "true"},
-                                  timeout=15)
-        if resp.ok:
-            items = resp.json().get("data", {}).get("items", [])
-            if items:
-                person_id = items[0]["item"]["id"]
-
-    if not person_id and phone:
-        resp = http_requests.get(f"{base}/persons/search",
-                                  params={**params, "term": phone},
-                                  timeout=15)
-        if resp.ok:
-            items = resp.json().get("data", {}).get("items", [])
-            if items:
-                person_id = items[0]["item"]["id"]
-
-    # 2. Create person if not found
-    if not person_id:
-        person_data = {"name": name or email or phone}
-        if email:
-            person_data["email"] = [{"value": email, "primary": True}]
-        if phone:
-            person_data["phone"] = [{"value": phone, "primary": True}]
-        resp = http_requests.post(f"{base}/persons", params=params, json=person_data, timeout=15)
-        if resp.ok and resp.json().get("success"):
-            person_id = resp.json()["data"]["id"]
-            logging.info("[CRM] Created Pipedrive person %s for %s", person_id, email or phone)
-        else:
-            logging.error("[CRM] Failed to create Pipedrive person: %s", resp.text[:300])
-            return
-
-    # 3. Check if deal already exists for this person in the target pipeline
-    resp = http_requests.get(f"{base}/persons/{person_id}/deals", params=params, timeout=15)
-    if resp.ok:
-        # Get pipeline ID for our stage
-        stage_resp = http_requests.get(f"{base}/stages/{PIPEDRIVE_STAGE_ID}", params=params, timeout=15)
-        pipeline_id = None
-        if stage_resp.ok and stage_resp.json().get("success"):
-            pipeline_id = stage_resp.json()["data"]["pipeline_id"]
-
-        existing_deals = resp.json().get("data") or []
-        for deal in existing_deals:
-            if pipeline_id and deal.get("pipeline_id") == pipeline_id:
-                # Deal already exists — just add the transcript as a note
-                deal_id = deal["id"]
-                logging.info("[CRM] Deal %s already exists for person %s, adding note", deal_id, person_id)
-                _pipedrive_add_note(deal_id, transcript, conversation_id, account_id)
-                return
-
-    # 4. Create deal
-    deal_title = name or email or phone or "Chatwoot conversation"
-    deal_data = {
-        "title": deal_title,
-        "stage_id": PIPEDRIVE_STAGE_ID,
-        "person_id": person_id,
-    }
-    resp = http_requests.post(f"{base}/deals", params=params, json=deal_data, timeout=15)
-    if resp.ok and resp.json().get("success"):
-        deal_id = resp.json()["data"]["id"]
-        logging.info("[CRM] Created Pipedrive deal %s for %s", deal_id, email or phone)
-        _pipedrive_add_note(deal_id, transcript, conversation_id, account_id)
-    else:
-        logging.error("[CRM] Failed to create Pipedrive deal: %s", resp.text[:300])
-
-
-def _pipedrive_add_note(deal_id, transcript, conversation_id, account_id):
-    """Add a note with the chat transcript to a Pipedrive deal."""
-    base = "https://api.pipedrive.com/v1"
-    params = {"api_token": PIPEDRIVE_API_TOKEN}
-
-    note_content = transcript
-    if conversation_id and account_id:
-        chatwoot_link = f"{CHATWOOT_URL}/app/accounts/{account_id}/conversations/{conversation_id}"
-        note_content = f'<a href="{chatwoot_link}">View in Chatwoot</a><br /><br />{transcript}'
-
-    resp = http_requests.post(f"{base}/notes", params=params,
-                               json={"deal_id": deal_id, "content": note_content},
-                               timeout=15)
-    if resp.ok:
-        logging.info("[CRM] Added transcript note to deal %s", deal_id)
-    else:
-        logging.error("[CRM] Failed to add note to deal %s: %s", deal_id, resp.text[:300])
-
-
-def _sendgrid_sync(email, name, phone):
-    """Add contact to a SendGrid list."""
-    if not email:
-        return
-
-    fname, lname = "", ""
-    if name:
-        parts = name.split(None, 1)
-        fname = parts[0]
-        lname = parts[1] if len(parts) > 1 else ""
-
-    contact = {"email": email}
-    if fname:
-        contact["first_name"] = fname
-    if lname:
-        contact["last_name"] = lname
-    if phone:
-        contact["phone_number"] = phone
-
-    resp = http_requests.put(
-        "https://api.sendgrid.com/v3/marketing/contacts",
-        json={"list_ids": [SENDGRID_LIST_ID], "contacts": [contact]},
-        headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
-        timeout=15,
-    )
-    if resp.ok:
-        logging.info("[CRM] Added %s to SendGrid list %s", email, SENDGRID_LIST_ID)
-    else:
-        logging.error("[CRM] SendGrid error: %s", resp.text[:300])
+    out = []
+    for m in messages or []:
+        out.append({
+            "name": "Customer" if m["role"] == "user" else "Agent",
+            "msg": m.get("content", ""),
+            "time": "",
+        })
+    return out
 
 
 def _taskbot_add_label(account_id: int, conversation_id: int, label: str):
@@ -1976,7 +2103,8 @@ EMAILBOT_SYSTEM_PROMPT = (
     "POLICIES:\n"
     "We do not allow CPNs — they are illegal. We only work with legitimate Social Security Numbers.\n"
     "When a customer asks for a phone call, do not offer to call them directly. "
-    "Instead, offer to schedule a call with a team member and ask for their preferred date/time and phone number.\n\n"
+    "Instead, share this scheduling link so they can book a call: "
+    "https://calendar.google.com/calendar/u/0/appointments/schedules/AcZssZ0wNCGZTSpEY2fI6wPXSQU9jEr-hPa9hK8nkWTqQhJHWFkaVIRePrl_Xvlw5rkYiWpwAkEqCmmw\n\n"
 
     "I'll give you previous chat requests we've received and how we responded for reference."
 )
@@ -1996,7 +2124,8 @@ SMS_DRAFT_PROMPT = (
     "POLICIES:\n"
     "We do not allow CPNs — they are illegal. We only work with legitimate Social Security Numbers.\n"
     "When a customer asks for a phone call, do not offer to call them directly. "
-    "Instead, offer to schedule a call with a team member and ask for their preferred date/time and phone number.\n\n"
+    "Instead, share this scheduling link so they can book a call: "
+    "https://calendar.google.com/calendar/u/0/appointments/schedules/AcZssZ0wNCGZTSpEY2fI6wPXSQU9jEr-hPa9hK8nkWTqQhJHWFkaVIRePrl_Xvlw5rkYiWpwAkEqCmmw\n\n"
 
     "Use your tools to look up real data before responding. "
     "Do NOT use the transfer_to_agent tool — this is a draft, not a live conversation.\n\n"
