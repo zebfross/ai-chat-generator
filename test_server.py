@@ -7,7 +7,7 @@ run without any real API calls.
 
 Usage:
   1. Start the bot in another terminal:
-     cd /Users/zeb/Documents/GitHub/ai-chat-generator
+     cd /Users/zeb/code/ai-chat-generator
      source .env
      CHATWOOT_URL=http://localhost:5051 ANTHROPIC_BASE_URL=http://localhost:5052 PORT=5050 venv/bin/python app.py
 
@@ -777,7 +777,7 @@ def main():
         print(f"\nERROR: Cannot reach the bot at {BOT_URL}")
         print(
             f"Start it first:\n"
-            f"  cd /Users/zeb/Documents/GitHub/ai-chat-generator\n"
+            f"  cd /Users/zeb/code/ai-chat-generator\n"
             f"  source .env\n"
             f"  CHATWOOT_URL=http://localhost:{CW_PORT} "
             f"ANTHROPIC_BASE_URL=http://localhost:{ANT_PORT} "

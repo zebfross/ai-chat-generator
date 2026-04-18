@@ -1,5 +1,5 @@
 #!/bin/bash
-cd /Users/zeb/Documents/GitHub/ai-chat-generator
+cd /Users/zeb/code/ai-chat-generator
 set -a
 source .env
 source .env-test
