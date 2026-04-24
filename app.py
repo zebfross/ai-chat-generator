@@ -2422,6 +2422,15 @@ def review_system_prompt():
     return jsonify({"system_prompt": prompt, "channel": channel})
 
 
+@MyApp.route("/review/tools")
+def review_tools():
+    if not _check_review_key():
+        return jsonify({"error": "unauthorized"}), 401
+
+    tools = [{"name": t["name"], "description": t.get("description", "")} for t in TOOLS]
+    return jsonify({"tools": tools})
+
+
 @MyApp.route("/review/conversation-history")
 def review_conversation_history():
     if not _check_review_key():

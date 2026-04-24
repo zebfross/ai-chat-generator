@@ -32,6 +32,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .context-item { background: #fafafa; border: 1px solid #e5e5e5; border-radius: 6px; padding: 12px; margin-top: 8px; }
 .system-prompt-box { background: #f0f4ff; border: 1px solid #c7d2fe; border-radius: 6px; padding: 14px; margin-top: 8px; white-space: pre-wrap; font-size: 0.85em; line-height: 1.5; max-height: 300px; overflow-y: auto; }
 .system-prompt-box .prompt-label { font-weight: 600; color: #4338ca; margin-bottom: 6px; font-size: 0.9em; }
+.tools-box { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 14px; margin-top: 8px; font-size: 0.85em; }
+.tools-box .tools-label { font-weight: 600; color: #166534; margin-bottom: 8px; font-size: 0.9em; }
+.tool-item { padding: 6px 0; border-bottom: 1px solid #dcfce7; }
+.tool-item:last-child { border-bottom: none; }
+.tool-item .tool-name { font-family: ui-monospace, SFMono-Regular, monospace; font-weight: 600; color: #166534; }
+.tool-item .tool-desc { color: #555; margin-top: 2px; line-height: 1.4; }
 .convo-history { background: #fefce8; border: 1px solid #e5e7a0; border-radius: 6px; padding: 14px; margin-top: 8px; max-height: 400px; overflow-y: auto; }
 .convo-history .history-label { font-weight: 600; color: #854d0e; margin-bottom: 8px; font-size: 0.9em; }
 .convo-msg { padding: 6px 10px; margin-bottom: 4px; border-radius: 4px; font-size: 0.85em; line-height: 1.4; white-space: pre-wrap; }
@@ -232,11 +238,12 @@ async function loadContext(idx) {
   const container = document.getElementById("contextResults");
   container.innerHTML = '<div class="loading">Loading context...</div>';
 
-  // Fetch system prompt, Pinecone context, and conversation history in parallel
+  // Fetch system prompt, tools, Pinecone context, and conversation history in parallel
   const inboxParam = m.inbox_id ? "&inbox_id=" + m.inbox_id : "";
-  const [data, promptData, historyData] = await Promise.all([
+  const [data, promptData, toolsData, historyData] = await Promise.all([
     api("/review/context?query=" + encodeURIComponent(query)),
     api("/review/system-prompt?" + inboxParam),
+    api("/review/tools"),
     api("/review/conversation-history?conversation_id=" + m.conversation_id),
   ]);
 
@@ -248,6 +255,19 @@ async function loadContext(idx) {
     html += `<div class="system-prompt-box">
       <div class="prompt-label">System Prompt (${channelLabel})</div>
       ${escHtml(promptData.system_prompt)}
+    </div>`;
+  }
+
+  // Tools section
+  if (toolsData.tools && toolsData.tools.length > 0) {
+    html += `<div class="tools-box">
+      <div class="tools-label">Available Tools (${toolsData.tools.length})</div>
+      ${toolsData.tools.map(t => `
+        <div class="tool-item">
+          <div class="tool-name">${escHtml(t.name)}</div>
+          <div class="tool-desc">${escHtml(t.description)}</div>
+        </div>
+      `).join("")}
     </div>`;
   }
 
