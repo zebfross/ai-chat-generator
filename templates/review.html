@@ -65,6 +65,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
   <h1>Bot Response Review</h1>
   <div class="controls">
     <label>After: <input type="date" id="dateFilter"></label>
+    <label>Channel:
+      <select id="channelFilter">
+        <option value="chat">Chat</option>
+        <option value="email">Email</option>
+        <option value="sms">SMS</option>
+        <option value="">All</option>
+      </select>
+    </label>
     <button onclick="loadMessages()">Filter</button>
     <label><input type="checkbox" id="hideReviewed"> Hide reviewed</label>
     <span class="counter" id="counter"></span>
@@ -100,7 +108,12 @@ async function api(path, opts) {
 
 function applyFilter() {
   const hide = document.getElementById("hideReviewed").checked;
-  messages = hide ? allMessages.filter(m => !reviewedSet.has(m.message_id)) : allMessages;
+  const channel = document.getElementById("channelFilter").value;
+  messages = allMessages.filter(m => {
+    if (hide && reviewedSet.has(m.message_id)) return false;
+    if (channel && m.channel !== channel) return false;
+    return true;
+  });
 }
 
 async function loadMessages() {
@@ -338,17 +351,19 @@ document.addEventListener("keydown", e => {
   if (e.key === "ArrowRight") navigate(1);
 });
 
-// Re-filter when checkbox changes
-document.getElementById("hideReviewed").addEventListener("change", () => {
+// Re-filter when checkbox or channel changes
+function rerunFilter() {
   applyFilter();
   if (messages.length === 0) {
-    document.getElementById("cardContainer").innerHTML = '<div class="loading">All messages reviewed!</div>';
+    document.getElementById("cardContainer").innerHTML = '<div class="loading">No messages match the current filter.</div>';
   } else {
-    currentIdx = Math.min(currentIdx, messages.length - 1);
+    currentIdx = Math.min(Math.max(0, currentIdx), messages.length - 1);
     renderCard();
   }
   updateNav();
-});
+}
+document.getElementById("hideReviewed").addEventListener("change", rerunFilter);
+document.getElementById("channelFilter").addEventListener("change", rerunFilter);
 
 // Initial load
 loadMessages();

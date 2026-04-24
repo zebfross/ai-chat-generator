@@ -2357,14 +2357,23 @@ def review_messages():
             if customer_message and _TAPBACK_RE.match(customer_message):
                 continue
 
+            inbox_id_val = conv.get("inbox_id")
+            if inbox_id_val in EMAIL_INBOX_IDS:
+                channel = "email"
+            elif inbox_id_val in SMS_INBOX_IDS:
+                channel = "sms"
+            else:
+                channel = "chat"
+
             results.append({
                 "customer_message": customer_message,
                 "bot_response": content,
                 "conversation_id": conv_id,
                 "message_id": msg.get("id"),
                 "created_at": created,
-                "inbox_id": conv.get("inbox_id"),
+                "inbox_id": inbox_id_val,
                 "inbox_name": inbox_name,
+                "channel": channel,
                 "is_private": is_private,
                 "conversation_url": f"{CHATWOOT_URL}/app/accounts/{account_id}/conversations/{conv_id}",
             })
