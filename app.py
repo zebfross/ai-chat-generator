@@ -585,7 +585,11 @@ TOOLS = [
         "description": (
             "Search available tradelines (authorized-user credit lines) for sale. "
             "Use this when a customer asks about available tradelines, pricing, "
-            "or wants to find a tradeline matching certain criteria."
+            "or wants to find a tradeline matching certain criteria. "
+            "Response is paginated: `cards` is the current page (default 5 cards), "
+            "`paging.total` is how many match the filters in total. Use `paging.total` "
+            "(not the length of `cards`) when telling a customer how many tradelines "
+            "are available. Pass `count` and `offset` to fetch more or to page through."
         ),
         "input_schema": {
             "type": "object",
@@ -609,6 +613,14 @@ TOOLS = [
                 "price_max": {
                     "type": "number",
                     "description": "Maximum price in dollars.",
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "How many tradelines to return in this page. Defaults to 5.",
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Skip this many matching tradelines before returning results. Use for pagination.",
                 },
             },
             "required": [],
@@ -1156,7 +1168,7 @@ def _tool_create_calendar_event(tool_input: dict) -> str:
 def _tool_search_tradelines(tool_input: dict) -> str:
     """Search available tradelines via the TW API."""
     params = {}
-    for key in ("age_min", "age_max", "limit_min", "limit_max", "price_max"):
+    for key in ("age_min", "age_max", "limit_min", "limit_max", "price_max", "count", "offset"):
         val = tool_input.get(key)
         if val is not None:
             params[key] = val
@@ -1170,20 +1182,37 @@ def _tool_search_tradelines(tool_input: dict) -> str:
             verify=TW_VERIFY_SSL,
         )
         resp.raise_for_status()
-        cards = resp.json()
+        data = resp.json()
     except Exception as e:
         logging.exception("search_tradelines error")
         return f"Error searching tradelines: {e}"
 
+    cards = data.get("cards", []) if isinstance(data, dict) else []
+    paging = data.get("paging", {}) if isinstance(data, dict) else {}
+
     if not cards:
         return "No tradelines found matching those criteria."
 
-    lines = [f"Found {len(cards)} tradeline(s):\n"]
+    total = paging.get("total")
+    offset = paging.get("offset", 0)
+    returned = paging.get("returned", len(cards))
+    has_more = paging.get("has_more", False)
+    total_is_estimate = paging.get("total_is_estimate", False)
+
+    total_str = (f"≥{total}" if total_is_estimate else str(total)) if total is not None else "?"
+    header = (
+        f"Showing {offset + 1}-{offset + returned} of {total_str} matching tradeline(s):\n"
+    )
+    lines = [header]
     for c in cards:
         lines.append(
             f"- [{c['name']} – ${int(float(c['limit'])):,} limit]({c['url']}) | "
             f"Age: {c['age_months']} months | Price: ${c['price']} | "
             f"Stock: {c['stock_remaining']}"
+        )
+    if has_more:
+        lines.append(
+            f"\n(More available. Pass offset={offset + returned} to see the next page.)"
         )
     return "\n".join(lines)
 
