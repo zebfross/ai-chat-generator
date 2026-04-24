@@ -674,11 +674,12 @@ TOOLS = [
     {
         "name": "seller_payouts",
         "description": (
-            "Look up a seller's payout history and pending payouts. "
-            "Use this when a seller asks about their payouts, earnings, or payments. "
-            "By default returns the upcoming payout window. For questions about past "
-            "payouts (e.g. 'what did I get paid last month?'), pass start_date and "
-            "end_date to query a specific range."
+            "Look up a seller's transactions including payments, refunds, voids, and failed charges. "
+            "Use this when a seller asks about their payouts, earnings, payments, refunds, or a specific charge. "
+            "By default returns the upcoming payout window. For questions about past payouts "
+            "(e.g. 'what did I get paid last month?') or a specific transaction, pass start_date and end_date. "
+            "Each transaction includes its type (payment/refund/void/fail/etc.) and the order_status so "
+            "you can explain failed or in-progress orders. Only 'payment' and 'refund' contribute to totals."
         ),
         "input_schema": {
             "type": "object",
