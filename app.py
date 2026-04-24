@@ -685,9 +685,10 @@ TOOLS = [
             "'pending_card_add' (buyer paid but seller hasn't added them to the card yet — explain this "
             "if asked why a payment hasn't been paid out), or 'not_applicable' (void/fail/etc.). "
             "Each pending_retries row has retry_status (retry_1/retry_2/retry_3/retrycancel_4/Failed), "
-            "next_attempt_date (when Authorize.net will try to charge again), expected_amount, and "
-            "order_status — use these to tell the seller why their expected recurring payment didn't "
-            "arrive and when the next attempt will happen. Totals only reflect the transactions array."
+            "next_attempt_date (when Authorize.net will try to charge again), and order_status — use "
+            "these to tell the seller why their expected recurring payment didn't arrive and when the "
+            "next attempt will happen. Don't promise the retry will succeed — after multiple failures, "
+            "most don't. Totals only reflect the transactions array."
         ),
         "input_schema": {
             "type": "object",
