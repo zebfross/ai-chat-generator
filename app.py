@@ -678,8 +678,14 @@ TOOLS = [
             "Use this when a seller asks about their payouts, earnings, payments, refunds, or a specific charge. "
             "By default returns the upcoming payout window. For questions about past payouts "
             "(e.g. 'what did I get paid last month?') or a specific transaction, pass start_date and end_date. "
-            "Each transaction includes its type (payment/refund/void/fail/etc.) and the order_status so "
-            "you can explain failed or in-progress orders. Only 'payment' and 'refund' contribute to totals."
+            "Each transaction includes its type (payment/refund/void/fail/etc.), order_status, and "
+            "payout_status which is one of: "
+            "'paid_out' (payment counted toward seller's total), "
+            "'refunded' (refund reduced seller's total), "
+            "'pending_card_add' (buyer paid but seller hasn't added them to the card yet — the seller "
+            "hasn't earned this payout; explain this if asked why it hasn't been paid), "
+            "'not_applicable' (void/fail/subscription_created — doesn't move money). "
+            "Totals only include paid_out and refunded rows."
         ),
         "input_schema": {
             "type": "object",
