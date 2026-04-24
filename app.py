@@ -675,7 +675,10 @@ TOOLS = [
         "name": "seller_payouts",
         "description": (
             "Look up a seller's payout history and pending payouts. "
-            "Use this when a seller asks about their payouts, earnings, or payments."
+            "Use this when a seller asks about their payouts, earnings, or payments. "
+            "By default returns the upcoming payout window. For questions about past "
+            "payouts (e.g. 'what did I get paid last month?'), pass start_date and "
+            "end_date to query a specific range."
         ),
         "input_schema": {
             "type": "object",
@@ -683,6 +686,14 @@ TOOLS = [
                 "email": {
                     "type": "string",
                     "description": "The seller's email address.",
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "Optional. Start of the date range in YYYY-MM-DD format. Omit to use the upcoming payout window.",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "Optional. End of the date range in YYYY-MM-DD format (inclusive). Omit to use the upcoming payout window.",
                 },
             },
             "required": ["email"],
@@ -1284,10 +1295,18 @@ def _tool_seller_payouts(tool_input: dict, customer_email: str = None) -> str:
     if email.lower() != customer_email.lower():
         return f"Error: for security, I can only look up payouts for the current customer ({customer_email})."
 
+    params = {"email": email}
+    start_date = (tool_input.get("start_date") or "").strip()
+    end_date = (tool_input.get("end_date") or "").strip()
+    if start_date:
+        params["start_date"] = start_date
+    if end_date:
+        params["end_date"] = end_date
+
     try:
         resp = http_requests.get(
             f"{TW_BASE_URL}/wp-json/tw/v1/bot/seller-payouts",
-            params={"email": email},
+            params=params,
             headers=_tw_headers(),
             timeout=15,
             verify=TW_VERIFY_SSL,
