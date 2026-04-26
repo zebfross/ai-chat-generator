@@ -1965,9 +1965,20 @@ def _sync_conversation_to_crm(data, include_transcript, event_name):
     """Shared CRM sync path — forwards contact + optional transcript to the WP LHC endpoint."""
     conversation = data.get("conversation") or data
     conversation_id = conversation.get("id")
-    account_id = data.get("account", {}).get("id")
+
+    # Chatwoot uses different shapes for account info across event types — try each.
+    account_id = (
+        data.get("account_id")
+        or (data.get("account") or {}).get("id")
+        or conversation.get("account_id")
+        or CHATWOOT_ACCOUNT_ID
+    )
 
     if not conversation_id or not account_id:
+        logging.warning(
+            "[CRM] missing IDs (conversation_id=%s account_id=%s) — payload keys=%s account=%s",
+            conversation_id, account_id, list(data.keys()), data.get("account"),
+        )
         return jsonify({"error": "missing conversation_id or account_id"}), 400
 
     meta = conversation.get("meta") or {}
@@ -1977,7 +1988,10 @@ def _sync_conversation_to_crm(data, include_transcript, event_name):
     phone = (sender.get("phone_number") or "").strip()
 
     if not email and not phone:
-        logging.info("[CRM] No email or phone for conversation %s, skipping", conversation_id)
+        logging.info(
+            "[CRM] No email or phone for conversation %s, skipping (sender keys=%s)",
+            conversation_id, list(sender.keys()),
+        )
         return jsonify({"status": "ignored", "reason": "no contact info"}), 200
 
     sender_id = email or phone or name
@@ -1988,6 +2002,8 @@ def _sync_conversation_to_crm(data, include_transcript, event_name):
     inbox = data.get("inbox") or {}
     channel_type = inbox.get("channel_type") or ""
     if "Internal" in channel_type:
+        logging.info("[CRM] Skipping internal channel for conversation %s (channel_type=%s)",
+                     conversation_id, channel_type)
         return jsonify({"status": "ignored", "reason": "internal channel"}), 200
 
     payload = {
@@ -2032,15 +2048,14 @@ def _handle_conversation_status_changed(data):
     """When a conversation is resolved, push transcript to CRM."""
     conversation = data.get("conversation") or data
     status = (conversation.get("status") or "").lower()
+    conversation_id = conversation.get("id")
+    logging.info("[CRM] Conversation %s status_changed → %s", conversation_id, status)
 
     if status != "resolved":
         return jsonify({"status": "ignored", "reason": f"status is {status}, not resolved"}), 200
 
-    conversation_id = conversation.get("id")
     logging.info("[CRM] Conversation %s resolved — syncing transcript to CRM", conversation_id)
     return _sync_conversation_to_crm(data, include_transcript=True, event_name="chat.chat_closed")
-
-    return jsonify({"status": "ok", "synced": True}), 200
 
 
 def _build_chat_messages(account_id, conversation_id):
