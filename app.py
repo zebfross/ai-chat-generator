@@ -1740,7 +1740,10 @@ def chatwoot_webhook():
     if data.get("private"):
         return jsonify({"status": "ignored", "reason": "private note"}), 200
 
-    content = (data.get("content") or "").strip()
+    # Chat widget messages arrive HTML-wrapped (<p>…</p>) even though Chatwoot
+    # stores them as plain text — strip tags so dedup vs. fetched history works
+    # and the model sees clean input.
+    content = re.sub(r"<[^>]+>", "", data.get("content") or "").strip()
     if not content:
         return jsonify({"status": "ignored", "reason": "empty message"}), 200
 
