@@ -1830,7 +1830,8 @@ def _handle_chat_message(content, conversation_id, account_id, inbox_id,
         account_id=account_id, conversation_id=conversation_id,
         inbox_id=inbox_id,
     )
-    send_chatwoot_message(account_id, conversation_id, bot_reply)
+    sent = send_chatwoot_message(account_id, conversation_id, bot_reply)
+    _save_message_tools((sent or {}).get("id"))
     _trace_event("reply_sent", reply=bot_reply[:500])
 
     # Bot handled the message — clear action-required
@@ -1913,9 +1914,10 @@ def _handle_draft_message(content, conversation_id, account_id, inbox_id,
         if tools_used:
             tool_lines = []
             for t in tools_used:
-                tool_lines.append(f"- `{t['name']}({t['input']})` → {t['result'][:200]}")
+                tool_lines.append(f"- `{t['name']}({t['input']})` → {t['result'][:1500]}")
             whisper += "\n\n---\n**Tools used:**\n" + "\n".join(tool_lines)
-        send_chatwoot_private_message(account_id, conversation_id, whisper)
+        sent = send_chatwoot_private_message(account_id, conversation_id, whisper)
+        _save_message_tools((sent or {}).get("id"))
         _trace_event("email_draft_sent", draft=draft[:500])
         # Draft generated — clear action-required until next incoming message
         _taskbot_remove_label(account_id, conversation_id, "action-required")
@@ -2257,6 +2259,8 @@ def _emailbot_run_with_tools(system: str, messages: list, max_rounds: int = 5,
                 account_id=account_id,
                 conversation_id=conversation_id,
             )
+            _trace_event("tool_executed", tool=tool_use.name,
+                         input=tool_use.input, result=str(result)[:1000])
             tools_used.append({
                 "name": tool_use.name,
                 "input": json.dumps(tool_use.input),
@@ -2315,13 +2319,40 @@ _REVIEW_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "revi
 
 
 def _review_db():
-    """Get a SQLite connection (creates table on first call)."""
+    """Get a SQLite connection (creates tables on first call)."""
     conn = sqlite3.connect(_REVIEW_DB_PATH)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS reviewed_messages "
         "(message_id INTEGER PRIMARY KEY, reviewed_at TEXT)"
     )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS message_tools "
+        "(message_id INTEGER PRIMARY KEY, tools_json TEXT, created_at TEXT)"
+    )
     return conn
+
+
+def _save_message_tools(message_id):
+    """Persist any tool_executed events from the current trace, keyed on Chatwoot message id."""
+    if not message_id or _current_trace is None:
+        return
+    tools = [
+        {"name": e.get("tool"), "input": e.get("input"), "result": e.get("result")}
+        for e in _current_trace.get("events", [])
+        if e.get("type") == "tool_executed"
+    ]
+    if not tools:
+        return
+    try:
+        conn = _review_db()
+        conn.execute(
+            "INSERT OR REPLACE INTO message_tools (message_id, tools_json, created_at) VALUES (?, ?, ?)",
+            (message_id, json.dumps(tools), datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        logging.exception("Failed to persist message tools for message_id=%s", message_id)
 
 
 # iPhone tapback reactions: Liked "...", Loved "...", etc.
@@ -2514,6 +2545,25 @@ def review_tools():
 
     tools = [{"name": t["name"], "description": t.get("description", "")} for t in TOOLS]
     return jsonify({"tools": tools})
+
+
+@MyApp.route("/review/message-tools")
+def review_message_tools():
+    if not _check_review_key():
+        return jsonify({"error": "unauthorized"}), 401
+    message_id = request.args.get("message_id", type=int)
+    if not message_id:
+        return jsonify({"error": "message_id required"}), 400
+
+    conn = _review_db()
+    row = conn.execute(
+        "SELECT tools_json FROM message_tools WHERE message_id = ?",
+        (message_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"tools": []})
+    return jsonify({"tools": json.loads(row[0])})
 
 
 @MyApp.route("/review/conversation-history")
