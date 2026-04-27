@@ -695,8 +695,11 @@ TOOLS = [
             "(what you asked for) and `payout_window` (what was actually queried after snapping). "
             "When the seller asks about a calendar month, briefly explain the mapping (e.g. 'Your March "
             "charges fall into the Feb 20-Apr 20 payout cycle.'). "
-            "Response has two arrays: `transactions` (actual payment events with a real date) and "
-            "`pending_retries` (subscriptions whose charge failed and is currently retrying). "
+            "Response has three arrays: `transactions` (incoming payment events with a real date), "
+            "`pending_retries` (subscriptions whose charge failed and is currently retrying), and "
+            "`transfers` (the actual Stripe payouts that have been sent to the seller's connected bank "
+            "account — these are what the seller sees on their bank statement; they may settle 1–3 "
+            "business days after the `date` shown). "
             "Each transaction row has type (payment/refund/void/etc.), order_status, and payout_status — "
             "one of 'paid_out' (counted in total), 'refunded' (reduced total), "
             "'pending_card_add' (buyer paid but seller hasn't added them to the card yet — explain this "
@@ -705,7 +708,9 @@ TOOLS = [
             "next_attempt_date (when Authorize.net will try to charge again), and order_status — use "
             "these to tell the seller why their expected recurring payment didn't arrive and when the "
             "next attempt will happen. Don't promise the retry will succeed — after multiple failures, "
-            "most don't. Totals only reflect the transactions array."
+            "most don't. Each transfers row has date, amount, transfer_id, and description — use these "
+            "to answer 'when did I get paid?' or 'did the deposit go through?'. "
+            "Totals only reflect the transactions array."
         ),
         "input_schema": {
             "type": "object",
