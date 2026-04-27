@@ -2501,7 +2501,11 @@ def review_messages():
     # Sort newest first
     results.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
 
-    return jsonify({"messages": results, "page": page})
+    # has_more=False signals the client to stop paginating; True means there
+    # are more conversations to fetch even if this page yielded no qualifying
+    # bot replies (e.g. the page was full of internal notes).
+    has_more = len(conversations) > 0
+    return jsonify({"messages": results, "page": page, "has_more": has_more})
 
 
 @MyApp.route("/review/context")

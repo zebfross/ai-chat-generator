@@ -136,12 +136,15 @@ async function loadMessages() {
 
   let fetched = [];
   let page = 1;
-  while (page <= 5) {
+  // Keep paginating until Chatwoot reports no more conversations (has_more=false).
+  // A page may yield zero qualifying bot replies (e.g. all internal notes) but
+  // still have more conversations behind it, so we trust has_more, not length.
+  while (page <= 20) {
     let url = "/review/messages?page=" + page;
     if (after) url += "&after=" + after + "T00:00:00";
     const data = await api(url);
-    if (!data.messages || data.messages.length === 0) break;
-    fetched = fetched.concat(data.messages);
+    if (data.messages && data.messages.length) fetched = fetched.concat(data.messages);
+    if (data.has_more === false) break;
     page++;
   }
 
