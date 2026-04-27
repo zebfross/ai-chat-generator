@@ -1575,7 +1575,8 @@ def generate_bot_response(message, customer_name=None, customer_email=None,
 
     is_email = inbox_id in EMAIL_INBOX_IDS
     base_prompt = EMAIL_SYSTEM_PROMPT if is_email else SYSTEM_PROMPT
-    system = base_prompt + "\n\n"
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    system = base_prompt + f"\n\nToday's date is {today}. Use this when interpreting relative time references like 'last month' or 'this week'.\n\n"
 
     if _KNOWLEDGE_TITLES:
         system += _KNOWLEDGE_TITLES + "\n\n"
@@ -1882,7 +1883,8 @@ def _handle_draft_message(content, conversation_id, account_id, inbox_id,
         context += "\n---\n"
 
     base_prompt = EMAILBOT_SYSTEM_PROMPT if is_email else SMS_DRAFT_PROMPT
-    system = base_prompt + "\n\n"
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    system = base_prompt + f"\n\nToday's date is {today}. Use this when interpreting relative time references like 'last month' or 'this week'.\n\n"
     # Enrich customer info from WP user lookup
     user_info = _lookup_user_info(customer_email, sender_phone)
     if user_info:
