@@ -2397,7 +2397,8 @@ def review_messages():
     account_id = CHATWOOT_ACCOUNT_ID
 
     # Fetch conversations from Chatwoot (sorted newest first)
-    params = {"page": page}
+    # status=all so resolved conversations stay visible in review (default is open only)
+    params = {"page": page, "status": "all"}
     url = f"{CHATWOOT_URL}/api/v1/accounts/{account_id}/conversations"
     headers = {"api_access_token": CHATWOOT_USER_TOKEN}
 
