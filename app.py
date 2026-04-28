@@ -513,6 +513,18 @@ for _id in _sms_ids_raw.split(","):
         except ValueError:
             pass
 
+# Inboxes whose conversations should sync to Pipedrive (default: chat widget only).
+# Override via CRM_INBOX_IDS="2,5" if more inboxes should push contacts.
+_crm_ids_raw = os.environ.get("CRM_INBOX_IDS", "2")
+CRM_INBOX_IDS = set()
+for _id in _crm_ids_raw.split(","):
+    _id = _id.strip()
+    if _id:
+        try:
+            CRM_INBOX_IDS.add(int(_id))
+        except ValueError:
+            pass
+
 SYSTEM_PROMPT = (
     "You are a TradelineWorks.com support chat agent. "
     "This is a live chat — keep responses very short, casual, and conversational. "
@@ -1997,6 +2009,14 @@ def _sync_conversation_to_crm(data, include_transcript, event_name):
             conversation_id, account_id, list(data.keys()), data.get("account"),
         )
         return jsonify({"error": "missing conversation_id or account_id"}), 400
+
+    inbox_id = (data.get("inbox") or {}).get("id") or conversation.get("inbox_id")
+    if CRM_INBOX_IDS and inbox_id not in CRM_INBOX_IDS:
+        logging.info(
+            "[CRM] Skipping conversation %s — inbox_id=%s not in CRM_INBOX_IDS=%s",
+            conversation_id, inbox_id, sorted(CRM_INBOX_IDS),
+        )
+        return jsonify({"status": "ignored", "reason": "inbox not in CRM allowlist"}), 200
 
     meta = conversation.get("meta") or {}
     sender = meta.get("sender") or data.get("sender") or {}
