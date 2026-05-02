@@ -1404,19 +1404,13 @@ def _get_online_agents() -> list:
 
 
 def _tool_transfer_to_agent() -> str:
-    """Check if agents are online before transferring.
+    """Transfer a conversation to a human agent.
 
-    Returns success text if agents are available, otherwise instructs the bot
-    to let the customer know someone will follow up during business hours.
+    Agents receive Chatwoot mobile push notifications regardless of dashboard
+    online status, so we don't gate on availability_status — just hand off and
+    let the team respond.
     """
-    online = _get_online_agents()
-    if not online:
-        return (
-            "No agents are currently online. Let the customer know someone "
-            "will get back to them during business hours (Mon-Fri 9am-6pm EST). "
-            "Do NOT use the transfer_to_agent tool again."
-        )
-    return "Conversation transferred to a live agent."
+    return "Conversation transferred to a live agent. They will respond shortly."
 
 
 def _tool_create_task(tool_input: dict, conversation_id: int = None,
