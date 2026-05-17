@@ -544,6 +544,9 @@ SYSTEM_PROMPT = (
     "POLICIES:\n"
     "We do not allow CPNs — they are illegal. We only work with legitimate Social Security Numbers.\n"
     "We do not guarantee seller payouts — payouts depend on the buyer staying on the tradeline and making successful payments.\n"
+    "We are not currently onboarding new sellers. If someone wants to sell tradelines / become a card holder / add their card, "
+    "direct them to join the waitlist at https://tradelineworks.com/join-our-seller-waitlist/ — do NOT create a task or transfer "
+    "to an agent for this. Existing sellers asking about their payouts or account should still be helped normally.\n"
     "When a customer asks for a phone call, do not offer to call them directly. "
     "Instead, share this scheduling link so they can book a call: "
     "https://calendar.google.com/calendar/u/0/appointments/schedules/AcZssZ0wNCGZTSpEY2fI6wPXSQU9jEr-hPa9hK8nkWTqQhJHWFkaVIRePrl_Xvlw5rkYiWpwAkEqCmmw\n\n"
@@ -576,6 +579,9 @@ EMAIL_SYSTEM_PROMPT = (
     "- When a customer asks for a phone call, do not offer to call them directly. "
     "Instead, share this scheduling link so they can book a call: "
     "https://calendar.google.com/calendar/u/0/appointments/schedules/AcZssZ0wNCGZTSpEY2fI6wPXSQU9jEr-hPa9hK8nkWTqQhJHWFkaVIRePrl_Xvlw5rkYiWpwAkEqCmmw\n"
+    "- We are not currently onboarding new sellers. If someone wants to sell tradelines / become a card holder / "
+    "add their card, direct them to the waitlist at https://tradelineworks.com/join-our-seller-waitlist/ — do NOT "
+    "create a task or transfer to an agent for this. Existing sellers asking about payouts or their account should still be helped normally.\n"
     "- Use your tools (search tradelines, look up orders, search knowledgebase, etc.) "
     "to find accurate information before responding.\n\n"
     "I'll give you previous chat requests we've received and how we responded for reference."
@@ -590,6 +596,11 @@ TW_BOT_API_KEY = os.environ.get("TW_BOT_API_KEY", "")
 TW_VERIFY_SSL = not any(h in TW_BASE_URL for h in ("localhost", ".local", ".test", "127.0.0.1"))
 CLICKUP_API_TOKEN = os.environ.get("CLICKUP_API_TOKEN", "")
 CLICKUP_LIST_ID = os.environ.get("CLICKUP_LIST_ID", "901708695881")
+CLICKUP_LIST_IDS = {
+    "engineering": os.environ.get("CLICKUP_LIST_ID_ENGINEERING", CLICKUP_LIST_ID),
+    "sales": os.environ.get("CLICKUP_LIST_ID_SALES", "901713827742"),
+    "support": os.environ.get("CLICKUP_LIST_ID_SUPPORT", "901713827743"),
+}
 
 TOOLS = [
     {
@@ -761,7 +772,8 @@ TOOLS = [
             "Create a task in the team's task management system (ClickUp). "
             "Use this when a customer request needs follow-up by the team, "
             "such as escalations, issues that can't be resolved in chat, "
-            "refund requests, or anything that requires manual action by staff."
+            "refund requests, or anything that requires manual action by staff. "
+            "Triage to the correct team via the category field."
         ),
         "input_schema": {
             "type": "object",
@@ -774,13 +786,24 @@ TOOLS = [
                     "type": "string",
                     "description": "Details about what needs to be done, including any relevant context from the conversation.",
                 },
+                "category": {
+                    "type": "string",
+                    "description": (
+                        "Which team should handle this task. "
+                        "'sales' = prospects with active purchase intent — e.g. asking which tradeline to buy, requesting a quote, ready to place an order but needs help closing. "
+                        "'support' = anyone not currently trying to buy: new-customer onboarding, account/order issues, refunds, scheduling, general questions, existing-customer help. "
+                        "'engineering' = bugs, broken features, website/app issues, anything technical. "
+                        "When unsure between sales and support, prefer support."
+                    ),
+                    "enum": ["sales", "support", "engineering"],
+                },
                 "priority": {
                     "type": "integer",
                     "description": "Priority level: 1=urgent, 2=high, 3=normal, 4=low. Default to 3 if unsure.",
                     "enum": [1, 2, 3, 4],
                 },
             },
-            "required": ["title", "description"],
+            "required": ["title", "description", "category"],
         },
     },
     {
@@ -1422,6 +1445,8 @@ def _tool_create_task(tool_input: dict, conversation_id: int = None,
     title = tool_input.get("title", "").strip()
     description = tool_input.get("description", "").strip()
     priority = tool_input.get("priority", 3)
+    category = (tool_input.get("category") or "engineering").strip().lower()
+    list_id = CLICKUP_LIST_IDS.get(category, CLICKUP_LIST_IDS["engineering"])
 
     if not title:
         return "Error: task title is required."
@@ -1435,7 +1460,7 @@ def _tool_create_task(tool_input: dict, conversation_id: int = None,
 
     try:
         resp = http_requests.post(
-            f"https://api.clickup.com/api/v2/list/{CLICKUP_LIST_ID}/task",
+            f"https://api.clickup.com/api/v2/list/{list_id}/task",
             json={"name": title, "description": full_description, "priority": priority},
             headers={"Authorization": CLICKUP_API_TOKEN, "Content-Type": "application/json"},
             timeout=15,
@@ -1457,7 +1482,7 @@ def _tool_create_task(tool_input: dict, conversation_id: int = None,
             http_requests.post(
                 whisper_url,
                 json={
-                    "content": f"\U0001f4cb **Task created:** [{title}]({task_url})\n\n_Priority: {priority}_",
+                    "content": f"\U0001f4cb **Task created:** [{title}]({task_url})\n\n_Category: {category} · Priority: {priority}_",
                     "message_type": "outgoing",
                     "private": True,
                 },
@@ -2212,6 +2237,9 @@ EMAILBOT_SYSTEM_PROMPT = (
 
     "POLICIES:\n"
     "We do not allow CPNs — they are illegal. We only work with legitimate Social Security Numbers.\n"
+    "We are not currently onboarding new sellers. If someone wants to sell tradelines / become a card holder / "
+    "add their card, direct them to the waitlist at https://tradelineworks.com/join-our-seller-waitlist/. "
+    "Existing sellers asking about payouts or their account should still be helped normally.\n"
     "When a customer asks for a phone call, do not offer to call them directly. "
     "Instead, share this scheduling link so they can book a call: "
     "https://calendar.google.com/calendar/u/0/appointments/schedules/AcZssZ0wNCGZTSpEY2fI6wPXSQU9jEr-hPa9hK8nkWTqQhJHWFkaVIRePrl_Xvlw5rkYiWpwAkEqCmmw\n\n"
@@ -2233,6 +2261,9 @@ SMS_DRAFT_PROMPT = (
 
     "POLICIES:\n"
     "We do not allow CPNs — they are illegal. We only work with legitimate Social Security Numbers.\n"
+    "We are not currently onboarding new sellers. If someone wants to sell tradelines / become a card holder / "
+    "add their card, direct them to the waitlist at https://tradelineworks.com/join-our-seller-waitlist/. "
+    "Existing sellers asking about payouts or their account should still be helped normally.\n"
     "When a customer asks for a phone call, do not offer to call them directly. "
     "Instead, share this scheduling link so they can book a call: "
     "https://calendar.google.com/calendar/u/0/appointments/schedules/AcZssZ0wNCGZTSpEY2fI6wPXSQU9jEr-hPa9hK8nkWTqQhJHWFkaVIRePrl_Xvlw5rkYiWpwAkEqCmmw\n\n"
