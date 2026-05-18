@@ -2460,6 +2460,10 @@ def review_messages():
         conv_id = conv.get("id")
         inbox = conv.get("inbox", {}) or {}
         inbox_name = inbox.get("name") or conv.get("meta", {}).get("channel", "Unknown")
+        conv_sender = (conv.get("meta") or {}).get("sender") or {}
+        contact_name = (conv_sender.get("name") or "").strip() or None
+        contact_email = (conv_sender.get("email") or "").strip() or None
+        contact_phone = (conv_sender.get("phone_number") or "").strip() or None
 
         # Fetch messages for this conversation
         msgs_url = f"{CHATWOOT_URL}/api/v1/accounts/{account_id}/conversations/{conv_id}/messages"
@@ -2540,6 +2544,9 @@ def review_messages():
                 "inbox_name": inbox_name,
                 "channel": channel,
                 "is_private": is_private,
+                "contact_name": contact_name,
+                "contact_email": contact_email,
+                "contact_phone": contact_phone,
                 "conversation_url": f"{CHATWOOT_URL}/app/accounts/{account_id}/conversations/{conv_id}",
             })
 
