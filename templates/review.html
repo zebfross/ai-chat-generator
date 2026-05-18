@@ -264,9 +264,10 @@ async function loadContext(idx) {
 
   // Fetch system prompt, tools, message-specific tool calls, Pinecone context, and conversation history in parallel
   const inboxParam = m.inbox_id ? "&inbox_id=" + m.inbox_id : "";
+  const msgIdParam = m.message_id ? "&message_id=" + m.message_id : "";
   const [data, promptData, toolsData, msgToolsData, historyData] = await Promise.all([
     api("/review/context?query=" + encodeURIComponent(query)),
-    api("/review/system-prompt?" + inboxParam),
+    api("/review/system-prompt?" + inboxParam + msgIdParam),
     api("/review/tools"),
     api("/review/message-tools?message_id=" + m.message_id),
     api("/review/conversation-history?conversation_id=" + m.conversation_id),
@@ -277,8 +278,11 @@ async function loadContext(idx) {
   // System prompt section
   if (promptData.system_prompt) {
     const channelLabel = (promptData.channel || "unknown").toUpperCase();
+    const sourceLabel = promptData.source === "captured"
+      ? '<span style="color:#16a34a;font-weight:500;"> &middot; captured at send time</span>'
+      : '<span style="color:#999;font-weight:500;"> &middot; base prompt (not captured for this message)</span>';
     html += `<div class="system-prompt-box">
-      <div class="prompt-label">System Prompt (${channelLabel})</div>
+      <div class="prompt-label">System Prompt (${channelLabel})${sourceLabel}</div>
       ${escHtml(promptData.system_prompt)}
     </div>`;
   }

@@ -1630,6 +1630,9 @@ def generate_bot_response(message, customer_name=None, customer_email=None,
 
     system += context
 
+    if _current_trace is not None:
+        _current_trace["system_prompt"] = system
+
     # Build message list: use conversation history if available,
     # otherwise just the single incoming message
     if conversation_history:
@@ -1873,7 +1876,9 @@ def _handle_chat_message(content, conversation_id, account_id, inbox_id,
         inbox_id=inbox_id,
     )
     sent = send_chatwoot_message(account_id, conversation_id, bot_reply)
-    _save_message_tools((sent or {}).get("id"))
+    sent_id = (sent or {}).get("id")
+    _save_message_tools(sent_id)
+    _save_message_prompt(sent_id)
     _trace_event("reply_sent", reply=bot_reply[:500])
 
     # Bot handled the message — clear action-required
@@ -1938,6 +1943,9 @@ def _handle_draft_message(content, conversation_id, account_id, inbox_id,
         system += "\n"
     system += context
 
+    if _current_trace is not None:
+        _current_trace["system_prompt"] = system
+
     # Build message list from conversation history
     if conversation_history:
         messages = list(conversation_history)
@@ -1960,7 +1968,9 @@ def _handle_draft_message(content, conversation_id, account_id, inbox_id,
                 tool_lines.append(f"- `{t['name']}({t['input']})` → {t['result'][:1500]}")
             whisper += "\n\n---\n**Tools used:**\n" + "\n".join(tool_lines)
         sent = send_chatwoot_private_message(account_id, conversation_id, whisper)
-        _save_message_tools((sent or {}).get("id"))
+        sent_id = (sent or {}).get("id")
+        _save_message_tools(sent_id)
+        _save_message_prompt(sent_id)
         _trace_event("email_draft_sent", draft=draft[:500])
         # Draft generated — clear action-required until next incoming message
         _taskbot_remove_label(account_id, conversation_id, "action-required")
@@ -2386,7 +2396,30 @@ def _review_db():
         "CREATE TABLE IF NOT EXISTS message_tools "
         "(message_id INTEGER PRIMARY KEY, tools_json TEXT, created_at TEXT)"
     )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS message_prompts "
+        "(message_id INTEGER PRIMARY KEY, system_prompt TEXT, created_at TEXT)"
+    )
     return conn
+
+
+def _save_message_prompt(message_id):
+    """Persist the assembled system prompt from the current trace, keyed on Chatwoot message id."""
+    if not message_id or _current_trace is None:
+        return
+    prompt = _current_trace.get("system_prompt")
+    if not prompt:
+        return
+    try:
+        conn = _review_db()
+        conn.execute(
+            "INSERT OR REPLACE INTO message_prompts (message_id, system_prompt, created_at) VALUES (?, ?, ?)",
+            (message_id, prompt, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        logging.exception("Failed to persist message prompt for message_id=%s", message_id)
 
 
 def _save_message_tools(message_id):
@@ -2587,24 +2620,45 @@ def review_system_prompt():
         return jsonify({"error": "unauthorized"}), 401
 
     inbox_id = request.args.get("inbox_id", type=int)
+    message_id = request.args.get("message_id", type=int)
     is_email = inbox_id in EMAIL_INBOX_IDS if inbox_id else False
     is_sms = inbox_id in SMS_INBOX_IDS if inbox_id else False
     is_draft = is_email or is_sms
 
     if is_email:
-        prompt = EMAILBOT_SYSTEM_PROMPT
         channel = "email"
     elif is_sms:
-        prompt = SMS_DRAFT_PROMPT
         channel = "sms"
     elif is_draft:
-        prompt = EMAILBOT_SYSTEM_PROMPT
         channel = "draft"
     else:
-        prompt = SYSTEM_PROMPT
         channel = "chat"
 
-    return jsonify({"system_prompt": prompt, "channel": channel})
+    # Prefer the actual prompt we sent for this message, if we captured it.
+    if message_id:
+        try:
+            conn = _review_db()
+            row = conn.execute(
+                "SELECT system_prompt FROM message_prompts WHERE message_id = ?",
+                (message_id,),
+            ).fetchone()
+            conn.close()
+            if row and row[0]:
+                return jsonify({"system_prompt": row[0], "channel": channel, "source": "captured"})
+        except Exception:
+            logging.exception("Failed to read stored prompt for message_id=%s", message_id)
+
+    # Fallback: static base prompt for the channel.
+    if is_email:
+        prompt = EMAILBOT_SYSTEM_PROMPT
+    elif is_sms:
+        prompt = SMS_DRAFT_PROMPT
+    elif is_draft:
+        prompt = EMAILBOT_SYSTEM_PROMPT
+    else:
+        prompt = SYSTEM_PROMPT
+
+    return jsonify({"system_prompt": prompt, "channel": channel, "source": "base"})
 
 
 @MyApp.route("/review/tools")
