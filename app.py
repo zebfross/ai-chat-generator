@@ -1530,7 +1530,7 @@ def _run_with_tools(system: str, messages: list, max_rounds: int = 5,
 
     for round_num in range(max_rounds):
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             system=system,
             messages=messages,
             tools=TOOLS,
@@ -2302,7 +2302,7 @@ def _emailbot_run_with_tools(system: str, messages: list, max_rounds: int = 5,
 
     for round_num in range(max_rounds):
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             system=system,
             messages=messages,
             tools=EMAILBOT_TOOLS,

@@ -131,7 +131,7 @@ def _make_text_response(text):
         "type": "message",
         "role": "assistant",
         "content": [{"type": "text", "text": text}],
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-sonnet-4-6",
         "stop_reason": "end_turn",
         "stop_sequence": None,
         "usage": {"input_tokens": 100, "output_tokens": 50},
@@ -152,7 +152,7 @@ def _make_tool_use_response(tool_name, tool_input):
                 "input": tool_input,
             }
         ],
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-sonnet-4-6",
         "stop_reason": "tool_use",
         "stop_sequence": None,
         "usage": {"input_tokens": 100, "output_tokens": 50},
