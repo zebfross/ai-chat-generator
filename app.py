@@ -32,7 +32,9 @@ if sentry_sdk and APP_ENV == "production" and SENTRY_DSN:
         send_default_pii=False,
         traces_sample_rate=0.0,
     )
-    logging.info("Sentry error reporting enabled (env=%s)", APP_ENV)
+    # print(), not logging — this runs before logging.basicConfig() below,
+    # so an INFO record here would be dropped.
+    print(f"Sentry error reporting enabled (env={APP_ENV})", file=sys.stderr)
 
 start_time = time.time()
 from datetime import datetime
