@@ -7,3 +7,4 @@ pyyaml
 flask-cors
 boto3
 Pillow
+sentry-sdk[flask]

@@ -11,6 +11,29 @@ from urllib.parse import parse_qs
 from dotenv import load_dotenv
 load_dotenv()
 
+# --- Error reporting (Sentry) ---------------------------------------------
+# Only reports from production so local dev doesn't pollute the dashboard.
+# Set APP_ENV=production on the server; SENTRY_DSN can override the default.
+APP_ENV = os.environ.get("APP_ENV", "development")
+SENTRY_DSN = os.environ.get(
+    "SENTRY_DSN",
+    "https://da2bc7f3838f4c75865f24b24900d9a2@o4504834995781632.ingest.sentry.io/4504834998140928",
+)
+try:
+    import sentry_sdk
+except ImportError:
+    sentry_sdk = None
+if sentry_sdk and APP_ENV == "production" and SENTRY_DSN:
+    from sentry_sdk.integrations.flask import FlaskIntegration
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=APP_ENV,
+        integrations=[FlaskIntegration()],
+        send_default_pii=False,
+        traces_sample_rate=0.0,
+    )
+    logging.info("Sentry error reporting enabled (env=%s)", APP_ENV)
+
 start_time = time.time()
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
@@ -1849,6 +1872,8 @@ def chatwoot_webhook():
                                  sender_id, is_excluded)
     except Exception as e:
         logging.exception("webhook error")
+        if sentry_sdk:
+            sentry_sdk.capture_exception(e)
         _trace_event("error", error=str(e))
         _current_trace["error"] = str(e)
         TOOL_LOG.append(_current_trace)
